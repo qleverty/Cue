@@ -14,6 +14,7 @@ const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
 static TICK_PNG:  &[u8] = include_bytes!("../pics/tick.png");
 static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
+static ICON_PNG:  &[u8] = include_bytes!("../icon.png");
 
 // ── data ─────────────────────────────────────────────────────────────────────
 
@@ -298,6 +299,7 @@ fn main() -> eframe::Result<()> {
                 .with_decorations(false)
                 .with_transparent(true)
                 .with_always_on_top()
+                .with_icon(eframe::icon_data::from_png_bytes(ICON_PNG).unwrap())
                 .with_inner_size([W, 100.0])
                 .with_min_inner_size([W, 50.0])
                 .with_resizable(false),
