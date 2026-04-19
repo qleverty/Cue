@@ -1,4 +1,4 @@
-![](https://cdn.jsdelivr.net/gh/qleverty/pics/cue.png)
+![](https://cdn.jsdelivr.net/gh/qleverty/pics/cue_.png)
 
 A tiny always-on-top widget to keep your tasks in focus. One main task, and a list of parallel ones — that's it.
 
