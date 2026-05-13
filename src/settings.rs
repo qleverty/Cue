@@ -1,0 +1,165 @@
+use serde::{Deserialize, Serialize};
+use eframe::egui::{
+    self, Color32, RichText, Sense, ViewportCommand, vec2,
+};
+use super::{BG, SEP};
+
+pub const SW: f32 = 300.0;
+pub const SH: f32 = 200.0;
+
+
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+pub enum NewTaskPos {
+    #[default]
+    End,
+    Beginning,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct Settings {
+    pub new_task_pos:     NewTaskPos,
+    pub replace_main:     bool,
+    pub reset_on_startup: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self { new_task_pos: NewTaskPos::End, replace_main: false, reset_on_startup: false }
+    }
+}
+
+fn settings_path() -> std::path::PathBuf {
+    super::app_dir().join("settings.json")
+}
+
+impl Settings {
+    pub fn load() -> Self {
+        std::fs::read_to_string(settings_path()).ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    }
+    pub fn save(&self) {
+        if let Ok(j) = serde_json::to_string(self) {
+            let _ = std::fs::write(settings_path(), j);
+        }
+    }
+}
+
+pub fn draw_settings_ui(
+    ctx: &egui::Context,
+    ui:  &mut egui::Ui,
+    settings: &mut Settings,
+) -> bool {
+    let mut close = false;
+
+    ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
+    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+
+    let bar_rect = egui::Rect::from_min_size(
+        ui.next_widget_position(), vec2(SW, 12.0));
+    let drag = ui.allocate_rect(bar_rect, Sense::drag());
+    if drag.dragged() { ctx.send_viewport_cmd(ViewportCommand::StartDrag); }
+
+    let close_center = bar_rect.max - vec2(11.0, 2.0);
+    let close_r = ui.allocate_rect(
+        egui::Rect::from_center_size(close_center, vec2(14.0, 10.0)),
+        Sense::click());
+    let close_col = if close_r.hovered() {
+        Color32::from_rgb(255, 80, 80)
+    } else {
+        Color32::from_rgb(220, 50, 50)
+    };
+    {
+        let c = close_center;
+        let tip   = c + vec2( 4.0,  0.0);
+        let top   = c + vec2(-2.5, -3.8);
+        let bot   = c + vec2(-2.5,  3.8);
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![tip, top, bot],
+            close_col,
+            egui::Stroke::NONE,
+        ));
+    }
+    if close_r.clicked() { close = true; }
+
+    let c = bar_rect.center();
+    for x in [-6.0f32, 0.0, 6.0] {
+        ui.painter().circle_filled(c + vec2(x, 4.0), 1.5,
+            Color32::from_white_alpha(35));
+    }
+
+    {
+        let p = ui.painter();
+        p.circle_filled(bar_rect.min + vec2(10.0, 10.5), 2.0, Color32::from_gray(160));
+        p.text(
+            bar_rect.min + vec2(17.0, 10.5),
+            egui::Align2::LEFT_CENTER,
+            "Настройки",
+            egui::FontId::proportional(10.5),
+            Color32::from_white_alpha(180),
+        );
+    }
+
+    ui.add_space(14.0);
+    ui.visuals_mut().selection.bg_fill = Color32::from_rgb(86, 111, 146);
+
+    let mut changed = false;
+
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.label(RichText::new("При создании новых задач:")
+            .color(Color32::from_white_alpha(120)).size(11.0));
+    });
+    ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.add(egui::RadioButton::new(
+            settings.new_task_pos == NewTaskPos::End, "")).clicked()
+        {
+            settings.new_task_pos = NewTaskPos::End;
+            changed = true;
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Перемещать в конец списка")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.add(egui::RadioButton::new(
+            settings.new_task_pos == NewTaskPos::Beginning, "")).clicked()
+        {
+            settings.new_task_pos = NewTaskPos::Beginning;
+            changed = true;
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Перемещать в начало списка")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.checkbox(&mut settings.replace_main, "").changed() { changed = true; }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Ставить на место главной задачи")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+
+    ui.add_space(12.0);
+    let y = ui.next_widget_position().y;
+    ui.painter().hline(14.0..=(SW - 14.0), y, (0.5, SEP));
+    ui.add_space(12.0);
+
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.checkbox(&mut settings.reset_on_startup, "").changed() { changed = true; }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Сбрасывать список задач при перезаходе")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+
+    if changed { settings.save(); }
+
+    close
+}
