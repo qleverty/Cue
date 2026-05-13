@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 pub mod settings;
+pub mod project;
 
 use eframe::egui::{
     self, Align, Color32, ImageSource, Layout, RichText,
@@ -9,8 +10,9 @@ use eframe::egui::{
 use serde::{Deserialize, Serialize};
 use std::mem;
 
-pub const W:   f32     = 260.0;
-pub const ROW: f32     = 28.0;
+pub const W:     f32   = 254.0;
+pub const MIN_W: f32   = 180.0;
+pub const ROW:   f32   = 28.0;
 pub const BG:  Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 222);
 pub const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
@@ -41,53 +43,7 @@ pub fn app_dir() -> std::path::PathBuf {
     }
 }
 
-fn tasks_path() -> std::path::PathBuf { app_dir().join("tasks.json") }
-fn lock_path()  -> std::path::PathBuf { app_dir().join("cue.lock")   }
-
-// ── data ─────────────────────────────────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Default)]
-struct Tasks {
-    main: String,
-    subs: Vec<String>,
-}
-
-impl Tasks {
-    fn load() -> Self {
-        std::fs::read_to_string(tasks_path()).ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
-    }
-    fn save(&self) {
-        if self.main.is_empty() && self.subs.is_empty() {
-            let _ = std::fs::remove_file(tasks_path());
-        } else if let Ok(j) = serde_json::to_string(self) {
-            let _ = std::fs::write(tasks_path(), j);
-        }
-    }
-}
-
-// ── add task ─────────────────────────────────────────────────────────────────
-
-fn add_task(t: &mut Tasks, text: String, s: &settings::Settings) {
-    use settings::NewTaskPos;
-    if t.main.is_empty() {
-        t.main = text;
-        return;
-    }
-    if s.replace_main {
-        let old = mem::replace(&mut t.main, text);
-        match s.new_task_pos {
-            NewTaskPos::End       => t.subs.push(old),
-            NewTaskPos::Beginning => t.subs.insert(0, old),
-        }
-    } else {
-        match s.new_task_pos {
-            NewTaskPos::End       => t.subs.push(text),
-            NewTaskPos::Beginning => t.subs.insert(0, text),
-        }
-    }
-}
+fn lock_path() -> std::path::PathBuf { app_dir().join("cue.lock") }
 
 // ── lock ─────────────────────────────────────────────────────────────────────
 
@@ -175,24 +131,9 @@ mod focus {
     pub fn focus_pid(_: u32) {}
 }
 
-// ── screen ───────────────────────────────────────────────────────────────────
+// ── screen & palette ──────────────────────────────────────────────────────────
 
 enum Screen { Main, Settings }
-
-// ── projects ──────────────────────────────────────────────────────────────────
-
-struct Project {
-    label: String,
-    dot:   Color32,
-}
-
-fn default_projects() -> Vec<Project> {
-    vec![
-        Project { label: "Дз".into(),   dot: Color32::from_rgb(249, 115,  22) },
-        Project { label: "Офис".into(), dot: Color32::from_rgb(234, 179,   8) },
-        Project { label: "Дом".into(),  dot: Color32::from_rgb( 59, 130, 246) },
-    ]
-}
 
 const PROJECT_PALETTE: &[Color32] = &[
     Color32::from_rgb(220,  50,  50), // red
@@ -211,16 +152,16 @@ const PROJECT_PALETTE: &[Color32] = &[
 // ── app ──────────────────────────────────────────────────────────────────────
 
 struct App {
-    t:                   Tasks,
-    settings:            settings::Settings,
-    screen:              Screen,
-    adding:              bool,
-    need_focus:          bool,
-    buf:                 String,
-    last_h:              f32,
-    projects:            Vec<Project>,
-    active_project:      Option<usize>,
-    project_open:        bool,
+    settings:              settings::Settings,
+    screen:                Screen,
+    adding:                bool,
+    need_focus:            bool,
+    buf:                   String,
+    last_h:                f32,
+    w:                     f32,
+    projects:              Vec<project::LoadedProject>,
+    active_project_idx:    usize,
+    project_open:          bool,
     project_adding:        bool,
     project_buf:           String,
     project_need_focus:    bool,
@@ -236,25 +177,62 @@ impl App {
         vis.window_stroke = Stroke::NONE;
         cc.egui_ctx.set_visuals(vis);
 
-        let settings = settings::Settings::load();
-        let t = if settings.reset_on_startup { Tasks::default() } else { Tasks::load() };
+        let _ = std::fs::create_dir_all(project::projects_dir());
+        let mut settings = settings::Settings::load();
+        let mut projects = project::load_all_projects();
 
-        Self {
-            t,
+        if projects.is_empty() {
+            projects.push(project::create_default_project());
+        }
+
+        let last_id    = settings.last_project_id.clone();
+        let active_idx = last_id.as_deref()
+            .and_then(|id| projects.iter().position(|p| p.id == id))
+            .unwrap_or(0);
+
+        let actual_id = projects[active_idx].id.clone();
+        if last_id.as_deref() != Some(&actual_id) {
+            settings.last_project_id = Some(actual_id);
+            settings.save();
+        }
+
+        projects[active_idx].acquire_lock();
+
+        let initial_w = settings.last_width.unwrap_or(W);
+
+        let mut app = Self {
             settings,
-            screen:              Screen::Main,
-            adding:              false,
-            need_focus:          false,
-            buf:                 String::new(),
-            last_h:              0.0,
-            projects:            default_projects(),
-            active_project:      None,
-            project_open:        false,
+            screen:                Screen::Main,
+            adding:                false,
+            need_focus:            false,
+            buf:                   String::new(),
+            last_h:                0.0,
+            w:                     initial_w,
+            projects,
+            active_project_idx:    active_idx,
+            project_open:          false,
             project_adding:        false,
             project_buf:           String::new(),
             project_need_focus:    false,
             project_new_color_idx: 0,
+        };
+
+        if app.settings.reset_on_startup {
+            let idx = app.active_project_idx;
+            app.projects[idx].main.clear();
+            app.projects[idx].subs.clear();
         }
+
+        app
+    }
+
+    fn switch_to_project(&mut self, idx: usize) {
+        if idx == self.active_project_idx { return; }
+        self.projects[self.active_project_idx].release_lock();
+        self.active_project_idx = idx;
+        self.projects[idx].acquire_lock();
+        self.settings.last_project_id = Some(self.projects[idx].id.clone());
+        self.settings.save();
     }
 }
 
@@ -274,11 +252,12 @@ impl eframe::App for App {
             return;
         }
 
-        let text_w = W - 10.0 - 8.0 - 28.0 - 10.0;
+        let text_w = self.w - 10.0 - 8.0 - 28.0 - 10.0;
 
         let main_h: f32 = {
-            let text = if self.t.main.is_empty() { "—" } else { &self.t.main };
-            let job = egui::text::LayoutJob::simple(
+            let idx  = self.active_project_idx;
+            let text = self.projects[idx].main_text().unwrap_or("—");
+            let job  = egui::text::LayoutJob::simple(
                 text.to_owned(),
                 egui::FontId::proportional(15.0),
                 Color32::WHITE,
@@ -288,28 +267,30 @@ impl eframe::App for App {
             (text_h + 12.0).max(40.0)
         };
 
-        let h = 12.0 + main_h + 5.0 + self.t.subs.len().min(9) as f32 * ROW + 28.0;
+        let h = 12.0 + main_h + 5.0
+            + self.projects[self.active_project_idx].subs.len().min(9) as f32 * ROW
+            + 28.0;
 
         if (h - self.last_h).abs() > 0.5 {
             self.last_h = h;
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(W, h)));
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(self.w, h)));
         }
 
         ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
         // ── drag bar ─────────────────────────────────────────────────────
-        let bar_rect = egui::Rect::from_min_size(ui.next_widget_position(), vec2(W, 12.0));
+        let bar_rect = egui::Rect::from_min_size(ui.next_widget_position(), vec2(self.w, 12.0));
         let drag = ui.allocate_rect(bar_rect, Sense::drag());
         if drag.dragged() { ctx.send_viewport_cmd(ViewportCommand::StartDrag); }
 
-        let close_center = bar_rect.max - vec2(11.0, 2.0);
+        let close_center = bar_rect.max - vec2(10.2, 3.1);
         let c = bar_rect.center();
 
         {
-            let (dot_col, label_text) = match self.active_project {
-                Some(i) => (self.projects[i].dot, self.projects[i].label.as_str()),
-                None    => (Color32::from_rgb(59, 130, 246), "Cue"),
+            let (dot_col, label_text) = {
+                let p = &self.projects[self.active_project_idx];
+                (p.color, p.name.clone())
             };
 
             let cue_rect = egui::Rect::from_min_size(
@@ -330,7 +311,7 @@ impl eframe::App for App {
             p.text(
                 bar_rect.min + vec2(17.0, 10.5),
                 egui::Align2::LEFT_CENTER,
-                label_text,
+                &label_text,
                 egui::FontId::proportional(10.5),
                 text_col,
             );
@@ -355,25 +336,25 @@ impl eframe::App for App {
                 let font = egui::FontId::proportional(10.5);
 
                 let row_w: f32 = {
-					let max_label_px = ctx.fonts_mut(|f| { 
-						self.projects.iter()
-							.map(|p| f.layout_no_wrap(
-								p.label.clone(), font.clone(), Color32::WHITE,
-							).size().x)
-							.fold(0.0_f32, f32::max)
-					});
-                    (max_label_px + 21.0).clamp(150.0, W - 16.0)
+                    let max_label_px = ctx.fonts_mut(|f| {
+                        self.projects.iter()
+                            .map(|p| f.layout_no_wrap(
+                                p.name.clone(), font.clone(), Color32::WHITE,
+                            ).size().x)
+                            .fold(0.0_f32, f32::max)
+                    });
+                    (max_label_px + 21.0).clamp(150.0, self.w - 16.0)
                 };
                 let text_avail = row_w - 15.0 - 4.0;
 
                 let project_adding     = self.project_adding;
                 let project_need_focus = self.project_need_focus;
 
-                let mut commit_project = false;
-                let mut cancel_project = false;
-                let mut start_adding   = false;
+                let mut commit_project             = false;
+                let mut cancel_project             = false;
+                let mut start_adding               = false;
                 let mut select_project: Option<usize> = None;
-                let mut open_settings  = false;
+                let mut open_settings              = false;
 
                 let area_resp = egui::Area::new(egui::Id::new("project_dropdown"))
                     .fixed_pos(dropdown_pos)
@@ -393,18 +374,19 @@ impl eframe::App for App {
                                         ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
 
                                         for (i, proj) in self.projects.iter().enumerate() {
+                                            let is_active = self.active_project_idx == i;
                                             let (rr, rr_resp) = ui.allocate_exact_size(
                                                 vec2(row_w, ROW_H), Sense::click());
                                             if rr_resp.hovered() {
                                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                                 ui.painter().rect_filled(rr, 3.0,
                                                     Color32::from_white_alpha(12));
-                                            } else if self.active_project == Some(i) {
+                                            } else if is_active {
                                                 ui.painter().rect_filled(rr, 3.0,
                                                     Color32::from_white_alpha(8));
                                             }
 
-                                            let label_col = if self.active_project == Some(i) {
+                                            let label_col = if is_active {
                                                 Color32::WHITE
                                             } else {
                                                 Color32::from_gray(190)
@@ -412,17 +394,17 @@ impl eframe::App for App {
 
                                             ui.painter().circle_filled(
                                                 rr.min + vec2(7.0, ROW_H / 2.0),
-                                                3.0, proj.dot);
+                                                3.0, proj.color);
 
                                             let mut job = egui::text::LayoutJob::simple_singleline(
-                                                proj.label.clone(), font.clone(), label_col);
-                                            job.wrap.max_width        = text_avail;
-                                            job.wrap.max_rows         = 1;
+                                                proj.name.clone(), font.clone(), label_col);
+                                            job.wrap.max_width         = text_avail;
+                                            job.wrap.max_rows          = 1;
                                             job.wrap.overflow_character = Some('…');
-											let galley = ctx.fonts_mut(|f| f.layout_job(job)); 
-											ui.painter().galley(
-												rr.min + vec2(15.0, (ROW_H - galley.size().y) / 2.0),
-												galley, label_col);
+                                            let galley = ctx.fonts_mut(|f| f.layout_job(job));
+                                            ui.painter().galley(
+                                                rr.min + vec2(15.0, (ROW_H - galley.size().y) / 2.0),
+                                                galley, label_col);
 
                                             if rr_resp.clicked() {
                                                 select_project = Some(i);
@@ -529,7 +511,6 @@ impl eframe::App for App {
                             });
                     });
 
-
                 if start_adding {
                     self.project_adding        = true;
                     self.project_need_focus    = true;
@@ -539,12 +520,20 @@ impl eframe::App for App {
                     self.project_need_focus = false;
                 }
                 if commit_project {
-                    let label = mem::take(&mut self.project_buf);
-                    if !label.is_empty() {
-                        self.projects.push(Project { label, dot: PROJECT_PALETTE[self.project_new_color_idx] });
+                    let name = mem::take(&mut self.project_buf);
+                    if !name.is_empty() {
+                        let color = PROJECT_PALETTE[self.project_new_color_idx];
+                        let p = project::LoadedProject::new(
+                            project::gen_id(), name, color, project::current_time(),
+                        );
+                        p.save();
+                        self.projects.push(p);
+                        let new_idx = self.projects.len() - 1;
+                        self.switch_to_project(new_idx);
                     }
                     self.project_new_color_idx = 0;
-                    self.project_adding = false;
+                    self.project_adding        = false;
+                    self.project_open          = false;
                 }
                 if cancel_project {
                     self.project_buf.clear();
@@ -552,7 +541,7 @@ impl eframe::App for App {
                     self.project_new_color_idx = 0;
                 }
                 if let Some(i) = select_project {
-                    self.active_project = Some(i);
+                    self.switch_to_project(i);
                     self.project_open   = false;
                     self.project_adding = false;
                     self.project_buf.clear();
@@ -587,14 +576,14 @@ impl eframe::App for App {
             Color32::from_rgb(220, 50, 50)
         };
         if close_resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
-        ui.painter().circle_filled(close_center, 2.8, close_col);
+        ui.painter().circle_filled(close_center, 3.15, close_col);
         if close_resp.clicked() { ctx.send_viewport_cmd(ViewportCommand::Close); }
 
         // ── main task ────────────────────────────────────────────────────
-        ui.allocate_ui_with_layout(vec2(W, main_h), Layout::right_to_left(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(vec2(self.w, main_h), Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(8.0);
             let (btn_alloc, _) = ui.allocate_exact_size(vec2(25.0, 25.0), Sense::hover());
-            let btn_shifted = btn_alloc.translate(vec2(0.0, -2.0));
+            let btn_shifted = btn_alloc.translate(vec2(0.2, -2.2));
             let tick_resp = ui.put(btn_shifted,
                 egui::Button::image(ImageSource::Bytes {
                     uri: "bytes://tick.png".into(),
@@ -606,16 +595,13 @@ impl eframe::App for App {
             );
             if tick_resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
             if tick_resp.clicked() {
-                self.t.main = if self.t.subs.is_empty() {
-                    String::new()
-                } else {
-                    self.t.subs.remove(0)
-                };
-                if !self.settings.reset_on_startup { self.t.save(); }
+                let idx = self.active_project_idx;
+                self.projects[idx].complete_main();
+                if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
             ui.add_space(8.0);
-            let avail = ui.available_rect_before_wrap();
-            let text_str = if self.t.main.is_empty() { "—" } else { &self.t.main };
+            let avail    = ui.available_rect_before_wrap();
+            let text_str = self.projects[self.active_project_idx].main_text().unwrap_or("—");
             let job = egui::text::LayoutJob::simple(
                 text_str.to_owned(),
                 egui::FontId::proportional(15.0),
@@ -629,21 +615,26 @@ impl eframe::App for App {
         });
 
         let y = ui.next_widget_position().y;
-        ui.painter().hline(0.0..=W, y, (0.5, SEP));
+        ui.painter().hline(0.0..=self.w, y, (0.5, SEP));
         ui.add_space(3.0);
 
         // ── sub tasks ────────────────────────────────────────────────────
-        if !self.t.subs.is_empty() {
-            let (mut promote, mut delete) = (None, None);
+        let sub_texts: Vec<String> = self.projects[self.active_project_idx]
+            .subs.values()
+            .map(|t| t.text.clone())
+            .collect();
 
-            let scroll_h = self.t.subs.len().min(9) as f32 * ROW;
+        if !sub_texts.is_empty() {
+            let (mut promote, mut delete) = (None::<usize>, None::<usize>);
+
+            let scroll_h = sub_texts.len().min(9) as f32 * ROW;
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for (i, task) in self.t.subs.iter().enumerate() {
+                    for (i, task_text) in sub_texts.iter().enumerate() {
                         ui.allocate_ui_with_layout(
-                            vec2(W, ROW),
+                            vec2(self.w, ROW),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 ui.add_space(7.0);
@@ -666,7 +657,7 @@ impl eframe::App for App {
                                     ui.add_space(10.0);
                                     let label_r = ui.add(
                                         egui::Label::new(
-                                            RichText::new(task.as_str())
+                                            RichText::new(task_text.as_str())
                                                 .color(Color32::from_gray(200))
                                                 .size(13.0),
                                         )
@@ -683,22 +674,19 @@ impl eframe::App for App {
                     }
                 });
 
+            let idx = self.active_project_idx;
             if let Some(i) = promote {
-                if self.t.main.is_empty() {
-                    self.t.main = self.t.subs.remove(i);
-                } else {
-                    mem::swap(&mut self.t.main, &mut self.t.subs[i]);
-                }
-                if !self.settings.reset_on_startup { self.t.save(); }
+                self.projects[idx].promote_sub(i);
+                if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
             if let Some(i) = delete {
-                self.t.subs.remove(i);
-                if !self.settings.reset_on_startup { self.t.save(); }
+                self.projects[idx].delete_sub(i);
+                if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
         }
 
         // ── add row ──────────────────────────────────────────────────────
-        ui.allocate_ui_with_layout(vec2(W, 28.0), Layout::left_to_right(Align::Center), |ui| {
+        ui.allocate_ui_with_layout(vec2(self.w, 28.0), Layout::left_to_right(Align::Center), |ui| {
             ui.add_space(12.0);
             if self.adding {
                 let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
@@ -706,7 +694,7 @@ impl eframe::App for App {
 
                 let r = ui.add(
                     egui::TextEdit::singleline(&mut self.buf)
-                        .desired_width(W - 24.0)
+                        .desired_width(self.w - 24.0)
                         .hint_text("Новое задание...")
                         .text_color(Color32::from_gray(200)),
                 );
@@ -723,8 +711,10 @@ impl eframe::App for App {
                 if commit || cancel {
                     if commit && !self.buf.is_empty() {
                         let text = mem::take(&mut self.buf);
-                        add_task(&mut self.t, text, &self.settings);
-                        if !self.settings.reset_on_startup { self.t.save(); }
+                        let s    = self.settings.clone();
+                        let idx  = self.active_project_idx;
+                        self.projects[idx].add_task(text, &s);
+                        if !s.reset_on_startup { self.projects[idx].save(); }
                     } else {
                         self.buf.clear();
                     }
@@ -750,6 +740,51 @@ impl eframe::App for App {
                 }
             }
         });
+
+        // ── resize handles ───────────────────────────────────────────────
+        const EDGE: f32 = 6.0;
+        let left_rect  = egui::Rect::from_min_size(egui::pos2(0.0, 0.0),            vec2(EDGE, h));
+        let right_rect = egui::Rect::from_min_size(egui::pos2(self.w - EDGE, 0.0),  vec2(EDGE, h));
+
+        let left_resp  = ui.allocate_rect(left_rect,  Sense::drag());
+        let right_resp = ui.allocate_rect(right_rect, Sense::drag());
+
+        if left_resp.hovered()  || left_resp.dragged()  {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeWest);
+        }
+        if right_resp.hovered() || right_resp.dragged() {
+            ctx.set_cursor_icon(egui::CursorIcon::ResizeEast);
+        }
+
+        if right_resp.dragged() {
+            let delta = right_resp.drag_delta().x;
+            self.w = (self.w + delta).max(MIN_W);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(self.w, h)));
+        }
+
+        if left_resp.dragged() {
+            let delta   = left_resp.drag_delta().x;
+            let old_w   = self.w;
+            self.w      = (self.w - delta).max(MIN_W);
+            let x_shift = old_w - self.w;
+            if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                ctx.send_viewport_cmd(ViewportCommand::OuterPosition(
+                    egui::pos2(outer.min.x + x_shift, outer.min.y),
+                ));
+            }
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(self.w, h)));
+        }
+
+        {
+            let is_dragging = right_resp.dragged() || left_resp.dragged();
+            let drag_key = egui::Id::new("resize_was_dragging");
+            let was_dragging: bool = ctx.data(|d| d.get_temp(drag_key).unwrap_or(false));
+            ctx.data_mut(|d| d.insert_temp(drag_key, is_dragging));
+            if was_dragging && !is_dragging {
+                self.settings.last_width = Some(self.w);
+                self.settings.save();
+            }
+        }
     }
 }
 
@@ -766,6 +801,8 @@ fn main() -> eframe::Result<()> {
     }
     write_lock();
 
+    let initial_w = settings::Settings::load().last_width.unwrap_or(W);
+
     let result = eframe::run_native(
         "Cue",
         eframe::NativeOptions {
@@ -774,8 +811,8 @@ fn main() -> eframe::Result<()> {
                 .with_transparent(true)
                 .with_always_on_top()
                 .with_icon(eframe::icon_data::from_png_bytes(ICON_PNG).unwrap())
-                .with_inner_size([W, 100.0])
-                .with_min_inner_size([W, 50.0])
+                .with_inner_size([initial_w, 100.0])
+                .with_min_inner_size([MIN_W, 50.0])
                 .with_resizable(false),
             ..Default::default()
         },

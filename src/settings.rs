@@ -7,7 +7,6 @@ use super::{BG, SEP};
 pub const SW: f32 = 300.0;
 pub const SH: f32 = 200.0;
 
-
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 pub enum NewTaskPos {
     #[default]
@@ -20,11 +19,21 @@ pub struct Settings {
     pub new_task_pos:     NewTaskPos,
     pub replace_main:     bool,
     pub reset_on_startup: bool,
+    #[serde(default)]
+    pub last_project_id:  Option<String>,
+    #[serde(default)]
+    pub last_width:       Option<f32>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { new_task_pos: NewTaskPos::End, replace_main: false, reset_on_startup: false }
+        Self {
+            new_task_pos:     NewTaskPos::End,
+            replace_main:     false,
+            reset_on_startup: false,
+            last_project_id:  None,
+            last_width:       None,
+        }
     }
 }
 
