@@ -292,7 +292,7 @@ impl eframe::App for App {
 
         let h = 12.0 + main_h + 5.0
             + self.projects[self.active_project_idx].subs.len().min(9) as f32 * ROW
-            + 28.0;
+            + 17.0;
 
         if (h - self.last_h).abs() > 0.5 {
             self.last_h = h;
@@ -692,7 +692,7 @@ impl eframe::App for App {
 
         let y = ui.next_widget_position().y;
         ui.painter().hline(0.0..=self.w, y, (0.5, SEP));
-        ui.add_space(3.0);
+        ui.add_space(6.0);
 
         // ── sub tasks ────────────────────────────────────────────────────
         let sub_texts: Vec<String> = self.projects[self.active_project_idx]
@@ -703,14 +703,14 @@ impl eframe::App for App {
         if !sub_texts.is_empty() {
             let (mut promote, mut delete) = (None::<usize>, None::<usize>);
 
-            let scroll_h = sub_texts.len().min(9) as f32 * ROW;
+            let scroll_h = sub_texts.len().min(9) as f32 * (ROW - 2.6);
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (i, task_text) in sub_texts.iter().enumerate() {
                         ui.allocate_ui_with_layout(
-                            vec2(self.w, ROW),
+                            vec2(self.w, ROW - 2.6),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 ui.add_space(7.0);
@@ -762,8 +762,9 @@ impl eframe::App for App {
         }
 
         // ── add row ──────────────────────────────────────────────────────
+		ui.add_space(-4.0);
         ui.allocate_ui_with_layout(vec2(self.w, 28.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.add_space(12.0);
+            ui.add_space(11.0);
             if self.adding {
                 let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
                 let enter  = ctx.input(|i| i.key_pressed(egui::Key::Enter));
