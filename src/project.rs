@@ -2,7 +2,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use eframe::egui::Color32;
 use std::sync::atomic::{AtomicU64, Ordering};
-use fs2::FileExt;
 use crate::settings::{NewTaskPos, Settings};
 
 pub fn current_time() -> u64 {
@@ -83,7 +82,6 @@ pub struct LoadedProject {
     color_hex:  String,
     tombstones: serde_json::Value,
     created_at: u64,
-    file_lock:  Option<std::fs::File>,
 }
 
 impl LoadedProject {
@@ -95,7 +93,6 @@ impl LoadedProject {
             subs:       IndexMap::new(),
             tombstones: serde_json::json!({}),
             created_at,
-            file_lock:  None,
         }
     }
 
@@ -117,23 +114,19 @@ impl LoadedProject {
             created_at:  self.created_at,
         };
         let path = projects_dir().join(format!("{}.json", self.id));
+        let tmp  = projects_dir().join(format!("{}.json.tmp", self.id));
         if let Ok(j) = serde_json::to_string(&file) {
-            let _ = std::fs::write(path, j);
+            if std::fs::write(&tmp, &j).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
         }
     }
 
-    pub fn acquire_lock(&mut self) {
+
+
+    pub fn delete_file(&self) {
         let path = projects_dir().join(format!("{}.json", self.id));
-        if let Ok(f) = std::fs::OpenOptions::new().write(true).open(&path) {
-            let _ = f.try_lock_exclusive();
-            self.file_lock = Some(f);
-        }
-    }
-
-    pub fn release_lock(&mut self) {
-        if let Some(f) = self.file_lock.take() {
-            let _ = f.unlock();
-        }
+        let _    = std::fs::remove_file(path);
     }
 
     pub fn add_task(&mut self, text: String, s: &Settings) {
@@ -187,7 +180,8 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
     entries.flatten()
         .filter_map(|e| {
             let path = e.path();
-            if path.extension()?.to_str()? != "json" { return None; }
+            let fname = path.file_name()?.to_str()?;
+            if !fname.ends_with(".json") || fname.ends_with(".json.tmp") { return None; }
             let id   = path.file_stem()?.to_str()?.to_owned();
             let text = std::fs::read_to_string(&path).ok()?;
             let file: ProjectFile = serde_json::from_str(&text).ok()?;
@@ -201,7 +195,6 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 subs:       file.tasks.subs,
                 tombstones: file.tombstones,
                 created_at: file.created_at,
-                file_lock:  None,
             })
         })
         .collect()

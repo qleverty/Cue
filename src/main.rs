@@ -131,6 +131,29 @@ mod focus {
     pub fn focus_pid(_: u32) {}
 }
 
+// ── delete confirmation dialog ────────────────────────────────────────────────
+
+#[cfg(target_os = "windows")]
+fn confirm_delete(name: &str) -> bool {
+    type HWND = *mut u8;
+    unsafe extern "system" {
+        fn MessageBoxW(hwnd: HWND, text: *const u16, caption: *const u16, utype: u32) -> i32;
+    }
+    fn to_wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0u16)).collect()
+    }
+    let text    = to_wide(&format!("Удалить проект «{}»?", name));
+    let caption = to_wide("Удаление проекта");
+    // MB_OKCANCEL | MB_ICONQUESTION = 0x00000021
+    let result = unsafe {
+        MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), 0x00000021)
+    };
+    result == 1
+}
+
+#[cfg(not(target_os = "windows"))]
+fn confirm_delete(_name: &str) -> bool { true }
+
 // ── screen & palette ──────────────────────────────────────────────────────────
 
 enum Screen { Main, Settings }
@@ -196,7 +219,6 @@ impl App {
             settings.save();
         }
 
-        projects[active_idx].acquire_lock();
 
         let initial_w = settings.last_width.unwrap_or(W);
 
@@ -228,9 +250,7 @@ impl App {
 
     fn switch_to_project(&mut self, idx: usize) {
         if idx == self.active_project_idx { return; }
-        self.projects[self.active_project_idx].release_lock();
         self.active_project_idx = idx;
-        self.projects[idx].acquire_lock();
         self.settings.last_project_id = Some(self.projects[idx].id.clone());
         self.settings.save();
     }
@@ -279,7 +299,6 @@ impl eframe::App for App {
         ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
-        // ── drag bar ─────────────────────────────────────────────────────
         let bar_rect = egui::Rect::from_min_size(ui.next_widget_position(), vec2(self.w, 12.0));
         let drag = ui.allocate_rect(bar_rect, Sense::drag());
         if drag.dragged() { ctx.send_viewport_cmd(ViewportCommand::StartDrag); }
@@ -343,9 +362,9 @@ impl eframe::App for App {
                             ).size().x)
                             .fold(0.0_f32, f32::max)
                     });
-                    (max_label_px + 21.0).clamp(150.0, self.w - 16.0)
+                    (max_label_px + 37.0).clamp(150.0, self.w - 16.0)
                 };
-                let text_avail = row_w - 15.0 - 4.0;
+                let text_avail = row_w - 15.0 - 4.0 - 18.0;
 
                 let project_adding     = self.project_adding;
                 let project_need_focus = self.project_need_focus;
@@ -354,6 +373,7 @@ impl eframe::App for App {
                 let mut cancel_project             = false;
                 let mut start_adding               = false;
                 let mut select_project: Option<usize> = None;
+                let mut delete_project: Option<usize> = None;
                 let mut open_settings              = false;
 
                 let area_resp = egui::Area::new(egui::Id::new("project_dropdown"))
@@ -375,8 +395,9 @@ impl eframe::App for App {
 
                                         for (i, proj) in self.projects.iter().enumerate() {
                                             let is_active = self.active_project_idx == i;
+
                                             let (rr, rr_resp) = ui.allocate_exact_size(
-                                                vec2(row_w, ROW_H), Sense::click());
+                                                vec2(row_w, ROW_H), Sense::hover());
                                             if rr_resp.hovered() {
                                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                                 ui.painter().rect_filled(rr, 3.0,
@@ -406,8 +427,35 @@ impl eframe::App for App {
                                                 rr.min + vec2(15.0, (ROW_H - galley.size().y) / 2.0),
                                                 galley, label_col);
 
-                                            if rr_resp.clicked() {
+                                            let name_rect = egui::Rect::from_min_size(
+                                                rr.min,
+                                                vec2(row_w - 18.0, ROW_H),
+                                            );
+                                            let name_resp = ui.allocate_rect(name_rect, Sense::click());
+                                            if name_resp.hovered() {
+                                                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                            }
+                                            if name_resp.clicked() {
                                                 select_project = Some(i);
+                                            }
+
+                                            if self.projects.len() > 1 {
+                                                let del_rect = egui::Rect::from_min_size(
+                                                    rr.min + vec2(row_w - 16.5, (ROW_H - 15.0) / 2.0),
+                                                    vec2(15.0, 15.0),
+                                                );
+                                                let del_resp = ui.allocate_rect(del_rect, Sense::click());
+                                                let cross_tint = if del_resp.hovered() {
+                                                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                                    Color32::WHITE
+                                                } else {
+                                                    Color32::from_gray(130)
+                                                };
+                                                ui.put(del_rect, egui::Image::new(ImageSource::Bytes {
+                                                    uri: "bytes://cross.png".into(),
+                                                    bytes: CROSS_PNG.into(),
+                                                }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
+                                                if del_resp.clicked() { delete_project = Some(i); }
                                             }
                                         }
 
@@ -562,6 +610,31 @@ impl eframe::App for App {
                     && !cue_resp.hovered()
                 {
                     self.project_open = false;
+                }
+
+                if let Some(i) = delete_project {
+                    let name = self.projects[i].name.clone();
+                    if confirm_delete(&name) {
+                        self.projects[i].delete_file();
+                        self.projects.remove(i);
+
+                        if i < self.active_project_idx {
+                            self.active_project_idx -= 1;
+                        } else if i == self.active_project_idx {
+                            if self.active_project_idx >= self.projects.len() {
+                                self.active_project_idx = self.projects.len().saturating_sub(1);
+                            }
+                        }
+
+                        if let Some(p) = self.projects.get(self.active_project_idx) {
+                            self.settings.last_project_id = Some(p.id.clone());
+                            self.settings.save();
+                        }
+
+                        self.project_open   = false;
+                        self.project_adding = false;
+                        self.project_buf.clear();
+                    }
                 }
             }
         }
