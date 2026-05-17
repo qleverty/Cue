@@ -222,7 +222,6 @@ impl App {
             settings.save();
         }
 
-
         let initial_w = settings.last_width.unwrap_or(W);
 
         let mut app = Self {
@@ -264,8 +263,63 @@ impl App {
 impl eframe::App for App {
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] { [0.0; 4] }
 
+
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        let window_focused = ctx.input(|i| i.focused);
+        if window_focused && !self.adding {
+            if ctx.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) {
+                let idx  = self.active_project_idx;
+                let proj = &self.projects[idx];
+                let mut lines: Vec<&str> = Vec::new();
+                if let Some(t) = proj.main_text() { lines.push(t); }
+                for task in proj.subs.values() { lines.push(&task.text); }
+                if !lines.is_empty() {
+                    let text = lines.join("\n");
+                    ctx.output_mut(|o| o.copied_text = text);
+                }
+            }
+
+            let paste = ctx.input(|i| {
+                i.events.iter().find_map(|e| {
+                    if let egui::Event::Paste(s) = e { Some(s.clone()) } else { None }
+                })
+            });
+            if let Some(raw) = paste {
+                if raw.len() <= 16 * 1024 {
+                    let tasks: Vec<String> = raw
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .take(50)
+                        .map(|l| l.chars().take(60).collect())
+                        .collect();
+                    if !tasks.is_empty() {
+                        let idx = self.active_project_idx;
+                        let s   = self.settings.clone();
+                        let mut iter = tasks.into_iter();
+                        if self.projects[idx].main.is_empty() {
+                            let first = iter.next().unwrap();
+                            self.projects[idx].main.insert(
+                                project::gen_id(),
+                                project::TaskData {
+                                    text:       first,
+                                    active:     true,
+                                    schedule:   None,
+                                    created_at: project::current_time(),
+                                },
+                            );
+                        }
+                        for text in iter {
+                            self.projects[idx].add_task(text, &s);
+                        }
+                        if !self.settings.reset_on_startup {
+                            self.projects[idx].save();
+                        }
+                    }
+                }
+            }
+        }
 
         if let Screen::Settings = self.screen {
             if settings::draw_settings_ui(&ctx, ui, &mut self.settings) {
@@ -289,10 +343,11 @@ impl eframe::App for App {
             let text_h = ctx.fonts_mut(|f| f.layout_job(job).size().y);
             (text_h + 12.0).max(40.0)
         };
+		let has_subs = !self.projects[self.active_project_idx].subs.is_empty();
 
         let h = 12.0 + main_h + 5.0
-            + self.projects[self.active_project_idx].subs.len().min(9) as f32 * ROW
-            + 17.0;
+            + self.projects[self.active_project_idx].subs.len().min(9) as f32 * (ROW - 5.0)
+            + if has_subs { 24.0 } else { 19.0 };
 
         if (h - self.last_h).abs() > 0.5 {
             self.last_h = h;
@@ -703,14 +758,14 @@ impl eframe::App for App {
         if !sub_texts.is_empty() {
             let (mut promote, mut delete) = (None::<usize>, None::<usize>);
 
-            let scroll_h = sub_texts.len().min(9) as f32 * (ROW - 2.6);
+            let scroll_h = sub_texts.len().min(9) as f32 * (ROW - 5.0);
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     for (i, task_text) in sub_texts.iter().enumerate() {
                         ui.allocate_ui_with_layout(
-                            vec2(self.w, ROW - 2.6),
+                            vec2(self.w, ROW - 5.0),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 ui.add_space(7.0);
@@ -762,9 +817,9 @@ impl eframe::App for App {
         }
 
         // ── add row ──────────────────────────────────────────────────────
-		ui.add_space(-4.0);
+        if has_subs { ui.add_space(-4.0); } else { ui.add_space(-8.0); };
         ui.allocate_ui_with_layout(vec2(self.w, 28.0), Layout::left_to_right(Align::Center), |ui| {
-            ui.add_space(11.0);
+            ui.add_space(4.0);
             if self.adding {
                 let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
                 let enter  = ctx.input(|i| i.key_pressed(egui::Key::Enter));
