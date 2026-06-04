@@ -23,6 +23,8 @@ pub struct Settings {
     pub last_project_id:  Option<String>,
     #[serde(default)]
     pub last_width:       Option<f32>,
+	#[serde(default)]
+    pub last_pos:         Option<[f32; 2]>,
 }
 
 impl Default for Settings {
@@ -33,6 +35,7 @@ impl Default for Settings {
             reset_on_startup: false,
             last_project_id:  None,
             last_width:       None,
+			last_pos:         None,
         }
     }
 }

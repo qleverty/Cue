@@ -711,7 +711,13 @@ impl eframe::App for App {
         };
         if close_resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
         ui.painter().circle_filled(close_center, 3.15, close_col);
-        if close_resp.clicked() { ctx.send_viewport_cmd(ViewportCommand::Close); }
+        if close_resp.clicked() { 
+            if let Some(outer) = ctx.input(|i| i.viewport().outer_rect) {
+                self.settings.last_pos = Some([outer.min.x, outer.min.y]);
+                self.settings.save();
+            }
+            ctx.send_viewport_cmd(ViewportCommand::Close); 
+        }
 
         // ── main task ────────────────────────────────────────────────────
         ui.allocate_ui_with_layout(vec2(self.w, main_h), Layout::right_to_left(Align::Center), |ui| {
@@ -936,19 +942,26 @@ fn main() -> eframe::Result<()> {
     }
     write_lock();
 
-    let initial_w = settings::Settings::load().last_width.unwrap_or(W);
+    let settings = settings::Settings::load();
+    let initial_w = settings.last_width.unwrap_or(W);
+
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_decorations(false)
+        .with_transparent(true)
+        .with_always_on_top()
+        .with_icon(eframe::icon_data::from_png_bytes(ICON_PNG).unwrap())
+        .with_inner_size([initial_w, 100.0])
+        .with_min_inner_size([MIN_W, 50.0])
+        .with_resizable(false);
+
+    if let Some(pos) = settings.last_pos {
+        viewport = viewport.with_position(egui::pos2(pos[0], pos[1]));
+    }
 
     let result = eframe::run_native(
         "Cue",
         eframe::NativeOptions {
-            viewport: egui::ViewportBuilder::default()
-                .with_decorations(false)
-                .with_transparent(true)
-                .with_always_on_top()
-                .with_icon(eframe::icon_data::from_png_bytes(ICON_PNG).unwrap())
-                .with_inner_size([initial_w, 100.0])
-                .with_min_inner_size([MIN_W, 50.0])
-                .with_resizable(false),
+            viewport,
             ..Default::default()
         },
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
