@@ -122,11 +122,11 @@ impl LoadedProject {
 
 
 
-    fn next_end_key(&self) -> f64 {
+    pub(crate) fn next_end_key(&self) -> f64 {
         self.subs.values().map(|t| t.order_key)
             .reduce(f64::max).map_or(0.0, |m| m + 1000.0)
     }
-    fn next_beg_key(&self) -> f64 {
+    pub(crate) fn next_beg_key(&self) -> f64 {
         self.subs.values().map(|t| t.order_key)
             .reduce(f64::min).map_or(0.0, |m| m - 1000.0)
     }
@@ -136,8 +136,7 @@ impl LoadedProject {
         let _    = std::fs::remove_file(path);
     }
 
-    pub fn add_task(&mut self, text: String, s: &Settings) {
-        let id       = gen_id();
+    pub fn add_task(&mut self, id: String, text: String, s: &Settings) {
         let mut task = TaskData { text, active: true, schedule: None, created_at: current_time(), order_key: 0.0 };
 
         if self.main.is_empty() {

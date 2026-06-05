@@ -162,6 +162,16 @@ fn confirm_delete(_name: &str) -> bool { true }
 
 enum Screen { Main, Settings }
 
+fn add_target_for(s: &settings::Settings, main_empty: bool) -> sync::oplog::AddTarget {
+    use settings::NewTaskPos;
+    use sync::oplog::AddTarget;
+    if main_empty || s.replace_main { return AddTarget::Main; }
+    match s.new_task_pos {
+        NewTaskPos::End       => AddTarget::End,
+        NewTaskPos::Beginning => AddTarget::Beginning,
+    }
+}
+
 const PROJECT_PALETTE: &[Color32] = &[
     Color32::from_rgb(220,  50,  50), // red
     Color32::from_rgb(249, 115,  22), // orange
@@ -307,24 +317,32 @@ impl eframe::App for App {
                         let s   = self.settings.clone();
                         let mut iter = tasks.into_iter();
                         if self.projects[idx].main.is_empty() {
-                            let first = iter.next().unwrap();
+                            let first   = iter.next().unwrap();
+                            let task_id = project::gen_id();
+                            let ts      = project::current_time();
+                            let _       = self.sync.record_op(sync::oplog::OpKind::AddTask {
+                                project_id: self.projects[idx].id.clone(),
+                                task_id:    task_id.clone(),
+                                text:       first.clone(),
+                                target:     sync::oplog::AddTarget::Main,
+                            });
                             self.projects[idx].main.insert(
-                                project::gen_id(),
-                                project::TaskData {
-                                    text:       first,
-                                    active:     true,
-                                    schedule:   None,
-                                    created_at: project::current_time(),
-                                    order_key:  0.0,
-                                },
+                                task_id,
+                                project::TaskData { text: first, active: true, schedule: None, created_at: ts, order_key: 0.0 },
                             );
                         }
                         for text in iter {
-                            self.projects[idx].add_task(text, &s);
+                            let task_id = project::gen_id();
+                            let target  = add_target_for(&s, false);
+                            let _       = self.sync.record_op(sync::oplog::OpKind::AddTask {
+                                project_id: self.projects[idx].id.clone(),
+                                task_id:    task_id.clone(),
+                                text:       text.clone(),
+                                target,
+                            });
+                            self.projects[idx].add_task(task_id, text, &s);
                         }
-                        if !self.settings.reset_on_startup {
-                            self.projects[idx].save();
-                        }
+                        if !self.settings.reset_on_startup { self.projects[idx].save(); }
                     }
                 }
             }
@@ -638,10 +656,15 @@ impl eframe::App for App {
                     let name = mem::take(&mut self.project_buf);
                     if !name.is_empty() {
                         let color = PROJECT_PALETTE[self.project_new_color_idx];
-                        let p = project::LoadedProject::new(
-                            project::gen_id(), name, color, project::current_time(),
-                        );
+                        let ts    = project::current_time();
+                        let p     = project::LoadedProject::new(project::gen_id(), name, color, ts);
                         p.save();
+                        let _ = self.sync.record_op(sync::oplog::OpKind::CreateProject {
+                            project_id: p.id.clone(),
+                            name:       p.name.clone(),
+                            color:      p.color_hex.clone(),
+                            created_at: ts,
+                        });
                         self.projects.push(p);
                         let new_idx = self.projects.len() - 1;
                         self.switch_to_project(new_idx);
@@ -682,6 +705,12 @@ impl eframe::App for App {
                 if let Some(i) = delete_project {
                     let name = self.projects[i].name.clone();
                     if confirm_delete(&name) {
+                        let project_id = self.projects[i].id.clone();
+                        let ts         = project::current_time();
+                        let _          = self.sync.record_op(sync::oplog::OpKind::DeleteProject {
+                            project_id: project_id.clone(),
+                        });
+                        self.sync.tombstones.add_project(&project_id, ts, &self.sync.identity.device_id);
                         self.projects[i].delete_file();
                         self.projects.remove(i);
 
@@ -742,6 +771,12 @@ impl eframe::App for App {
             if tick_resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
             if tick_resp.clicked() {
                 let idx = self.active_project_idx;
+                if let Some(task_id) = self.projects[idx].main.keys().next().cloned() {
+                    let _ = self.sync.record_op(sync::oplog::OpKind::CompleteMain {
+                        project_id: self.projects[idx].id.clone(),
+                        task_id,
+                    });
+                }
                 self.projects[idx].complete_main();
                 if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
@@ -822,10 +857,25 @@ impl eframe::App for App {
 
             let idx = self.active_project_idx;
             if let Some(i) = promote {
+                if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
+                    let _ = self.sync.record_op(sync::oplog::OpKind::PromoteTask {
+                        project_id: self.projects[idx].id.clone(),
+                        task_id:    task_id.clone(),
+                    });
+                }
                 self.projects[idx].promote_sub(i);
                 if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
             if let Some(i) = delete {
+                if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
+                    let task_id    = task_id.clone();
+                    let project_id = self.projects[idx].id.clone();
+                    let ts         = project::current_time();
+                    let _          = self.sync.record_op(sync::oplog::OpKind::DeleteTask {
+                        project_id: project_id.clone(), task_id: task_id.clone(),
+                    });
+                    self.sync.tombstones.add_task(&task_id, &project_id, ts, &self.sync.identity.device_id);
+                }
                 self.projects[idx].delete_sub(i);
                 if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
@@ -857,10 +907,18 @@ impl eframe::App for App {
 
                 if commit || cancel {
                     if commit && !self.buf.is_empty() {
-                        let text = mem::take(&mut self.buf);
-                        let s    = self.settings.clone();
-                        let idx  = self.active_project_idx;
-                        self.projects[idx].add_task(text, &s);
+                        let text    = mem::take(&mut self.buf);
+                        let s       = self.settings.clone();
+                        let idx     = self.active_project_idx;
+                        let task_id = project::gen_id();
+                        let target  = add_target_for(&s, self.projects[idx].main.is_empty());
+                        let _       = self.sync.record_op(sync::oplog::OpKind::AddTask {
+                            project_id: self.projects[idx].id.clone(),
+                            task_id:    task_id.clone(),
+                            text:       text.clone(),
+                            target,
+                        });
+                        self.projects[idx].add_task(task_id, text, &s);
                         if !s.reset_on_startup { self.projects[idx].save(); }
                     } else {
                         self.buf.clear();
