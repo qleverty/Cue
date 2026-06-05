@@ -52,6 +52,8 @@ pub struct TaskData {
     pub active:     bool,
     pub schedule:   Option<serde_json::Value>,
     pub created_at: u64,
+    #[serde(default)]
+    pub order_key:  f64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -62,11 +64,10 @@ struct TasksFile {
 
 #[derive(Serialize, Deserialize)]
 struct ProjectFile {
-    ver:        u32,
-    name:       String,
-    color:      String,
-    tasks:      TasksFile,
-    tombstones: serde_json::Value,
+    ver:   u32,
+    name:  String,
+    color: String,
+    tasks: TasksFile,
     #[serde(default)]
     last_edited: u64,
     #[serde(default)]
@@ -74,14 +75,13 @@ struct ProjectFile {
 }
 
 pub struct LoadedProject {
-    pub id:    String,
-    pub name:  String,
-    pub color: Color32,
-    pub main:  IndexMap<String, TaskData>,
-    pub subs:  IndexMap<String, TaskData>,
-    color_hex:  String,
-    tombstones: serde_json::Value,
-    created_at: u64,
+    pub id:         String,
+    pub name:       String,
+    pub color:      Color32,
+    pub main:       IndexMap<String, TaskData>,
+    pub subs:       IndexMap<String, TaskData>,
+    pub color_hex:  String,
+    pub created_at: u64,
 }
 
 impl LoadedProject {
@@ -91,7 +91,6 @@ impl LoadedProject {
             id, name, color,
             main:       IndexMap::new(),
             subs:       IndexMap::new(),
-            tombstones: serde_json::json!({}),
             created_at,
         }
     }
@@ -109,7 +108,6 @@ impl LoadedProject {
                 main: self.main.clone(),
                 subs: self.subs.clone(),
             },
-            tombstones:  self.tombstones.clone(),
             last_edited: current_time(),
             created_at:  self.created_at,
         };
@@ -124,30 +122,51 @@ impl LoadedProject {
 
 
 
+    fn next_end_key(&self) -> f64 {
+        self.subs.values().map(|t| t.order_key)
+            .reduce(f64::max).map_or(0.0, |m| m + 1000.0)
+    }
+    fn next_beg_key(&self) -> f64 {
+        self.subs.values().map(|t| t.order_key)
+            .reduce(f64::min).map_or(0.0, |m| m - 1000.0)
+    }
+
     pub fn delete_file(&self) {
         let path = projects_dir().join(format!("{}.json", self.id));
         let _    = std::fs::remove_file(path);
     }
 
     pub fn add_task(&mut self, text: String, s: &Settings) {
-        let task = TaskData { text, active: true, schedule: None, created_at: current_time() };
-        let id   = gen_id();
+        let id       = gen_id();
+        let mut task = TaskData { text, active: true, schedule: None, created_at: current_time(), order_key: 0.0 };
 
         if self.main.is_empty() {
             self.main.insert(id, task);
             return;
         }
         if s.replace_main {
-            let (old_id, old_task) = self.main.shift_remove_index(0).unwrap();
+            let (old_id, mut old_task) = self.main.shift_remove_index(0).unwrap();
             self.main.insert(id, task);
             match s.new_task_pos {
-                NewTaskPos::End       => { self.subs.insert(old_id, old_task); }
-                NewTaskPos::Beginning => { self.subs.shift_insert(0, old_id, old_task); }
+                NewTaskPos::End => {
+                    old_task.order_key = self.next_end_key();
+                    self.subs.insert(old_id, old_task);
+                }
+                NewTaskPos::Beginning => {
+                    old_task.order_key = self.next_beg_key();
+                    self.subs.shift_insert(0, old_id, old_task);
+                }
             }
         } else {
             match s.new_task_pos {
-                NewTaskPos::End       => { self.subs.insert(id, task); }
-                NewTaskPos::Beginning => { self.subs.shift_insert(0, id, task); }
+                NewTaskPos::End => {
+                    task.order_key = self.next_end_key();
+                    self.subs.insert(id, task);
+                }
+                NewTaskPos::Beginning => {
+                    task.order_key = self.next_beg_key();
+                    self.subs.shift_insert(0, id, task);
+                }
             }
         }
     }
@@ -163,8 +182,9 @@ impl LoadedProject {
     pub fn promote_sub(&mut self, i: usize) {
         let (sub_id, sub_task) = self.subs.shift_remove_index(i).unwrap();
         if !self.main.is_empty() {
-            let (old_id, old_task) = self.main.shift_remove_index(0).unwrap();
-            self.subs.shift_insert(i, old_id, old_task);
+            let (old_id, mut old_task) = self.main.shift_remove_index(0).unwrap();
+            old_task.order_key = self.next_beg_key();
+            self.subs.shift_insert(0, old_id, old_task);
         }
         self.main.insert(sub_id, sub_task);
     }
@@ -186,16 +206,21 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
             let text = std::fs::read_to_string(&path).ok()?;
             let file: ProjectFile = serde_json::from_str(&text).ok()?;
             let color = hex_to_color32(&file.color)?;
-            Some(LoadedProject {
+            let mut proj = LoadedProject {
                 id,
                 name:       file.name,
                 color,
                 color_hex:  file.color,
                 main:       file.tasks.main,
                 subs:       file.tasks.subs,
-                tombstones: file.tombstones,
                 created_at: file.created_at,
-            })
+            };
+            proj.subs.sort_by(|_, a, _, b|
+                a.order_key.partial_cmp(&b.order_key)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.created_at.cmp(&b.created_at))
+            );
+            Some(proj)
         })
         .collect()
 }

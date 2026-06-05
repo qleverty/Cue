@@ -5,6 +5,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod settings;
 pub mod project;
+pub mod sync;
 
 use eframe::egui::{
     self, Align, Color32, ImageSource, Layout, RichText,
@@ -179,6 +180,7 @@ const PROJECT_PALETTE: &[Color32] = &[
 
 struct App {
     settings:              settings::Settings,
+    sync:                  sync::SyncHandle,
     screen:                Screen,
     adding:                bool,
     need_focus:            bool,
@@ -211,6 +213,8 @@ impl App {
             projects.push(project::create_default_project());
         }
 
+        let sync = sync::SyncHandle::init(&mut projects);
+
         let last_id    = settings.last_project_id.clone();
         let active_idx = last_id.as_deref()
             .and_then(|id| projects.iter().position(|p| p.id == id))
@@ -226,6 +230,7 @@ impl App {
 
         let mut app = Self {
             settings,
+            sync,
             screen:                Screen::Main,
             adding:                false,
             need_focus:            false,
@@ -310,6 +315,7 @@ impl eframe::App for App {
                                     active:     true,
                                     schedule:   None,
                                     created_at: project::current_time(),
+                                    order_key:  0.0,
                                 },
                             );
                         }
