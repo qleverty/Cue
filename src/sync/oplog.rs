@@ -79,13 +79,36 @@ impl OpLog {
             ts,
             kind,
         };
+        let op_name = match &op.kind {
+            OpKind::CreateProject  { .. } => "CREATE_PROJECT",
+            OpKind::DeleteProject  { .. } => "DELETE_PROJECT",
+            OpKind::RenameProject  { .. } => "RENAME_PROJECT",
+            OpKind::RecolorProject { .. } => "RECOLOR_PROJECT",
+            OpKind::AddTask        { .. } => "ADD_TASK",
+            OpKind::DeleteTask     { .. } => "DELETE_TASK",
+            OpKind::CompleteMain   { .. } => "COMPLETE_MAIN",
+            OpKind::PromoteTask    { .. } => "PROMOTE_TASK",
+            OpKind::EditTask       { .. } => "EDIT_TASK",
+            OpKind::SetSharedSetting{..}  => "SET_SHARED_SETTING",
+        };
+        crate::clog!("[oplog] append seq={} op={op_name} path={:?}", self.next_seq, self.path);
         let mut line = serde_json::to_string(&op)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
         line.push('\n');
-        std::fs::OpenOptions::new()
-            .create(true).append(true).open(&self.path)?
-            .write_all(line.as_bytes())?;
+        match std::fs::OpenOptions::new().create(true).append(true).open(&self.path) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(line.as_bytes()) {
+                    crate::clog!("[oplog] write_all FAILED: {e}");
+                    return Err(e);
+                }
+            }
+            Err(e) => {
+                crate::clog!("[oplog] open FAILED: {e} path={:?}", self.path);
+                return Err(e);
+            }
+        }
         self.next_seq += 1;
+        crate::clog!("[oplog] append OK, next_seq={}", self.next_seq);
         Ok(op)
     }
 

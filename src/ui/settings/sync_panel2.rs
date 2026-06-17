@@ -1,0 +1,421 @@
+use std::time::Instant;
+
+use eframe::egui::{self, Color32, RichText, Sense, vec2};
+
+use crate::sync::{server::{PairingRequest, PORT}, peers::PeerEntry, PeerStatus, SyncHandle};
+
+// ── state ─────────────────────────────────────────────────────────────────────
+
+/// A device found on the LAN. Stage 4 will populate these via discovery.
+pub struct DiscoveredPeer {
+    pub device_id:   String,
+    pub device_name: String,
+    pub ip:          String,
+}
+
+pub enum ScanState {
+    Idle,
+    /// Active scan; `started_at` drives the dot animation and stub timeout.
+    Scanning { started_at: Instant },
+    Results(Vec<DiscoveredPeer>),
+    Empty,
+}
+
+impl Default for ScanState {
+    fn default() -> Self { Self::Idle }
+}
+
+pub struct SyncPanelState {
+    pub scan_state:    ScanState,
+    /// Mirrors `sync.identity.device_name` for the editable name field.
+    device_name_buf:   String,
+    name_initialized:  bool,
+}
+
+impl Default for SyncPanelState {
+    fn default() -> Self {
+        Self {
+            scan_state:       ScanState::default(),
+            device_name_buf:  String::new(),
+            name_initialized: false,
+        }
+    }
+}
+
+// ── entry point ───────────────────────────────────────────────────────────────
+
+pub fn draw(
+    ui:    &mut egui::Ui,
+    state: &mut SyncPanelState,
+    sync:  &mut SyncHandle,
+) -> bool {
+    if !state.name_initialized {
+        state.device_name_buf = sync.identity.device_name.clone();
+        state.name_initialized = true;
+    }
+
+    ui.add_space(14.0);
+
+    draw_pairing_banner(ui, sync);
+    draw_this_device(ui, state, sync);
+    sep(ui);
+    draw_peers(ui, sync);
+    sep(ui);
+    draw_discovery(ui, state);
+    sep(ui);
+    draw_sync_now(ui, sync);
+
+    ui.add_space(4.0);
+
+    false
+}
+
+// ── sections ──────────────────────────────────────────────────────────────────
+
+fn draw_pairing_banner(ui: &mut egui::Ui, sync: &mut SyncHandle) {
+    let pending: Vec<PairingRequest> = sync.shared.pending_pairings.lock().unwrap().clone();
+    let Some(req) = pending.first().cloned() else { return; };
+
+    let mut accept = false;
+    let mut reject = false;
+
+    egui::Frame::none()
+        .fill(Color32::from_rgba_unmultiplied(59, 130, 246, 31))
+        .stroke(egui::Stroke::new(
+            1.0,
+            Color32::from_rgba_unmultiplied(59, 130, 246, 64),
+        ))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(format!("{} хочет подключиться", req.device_name))
+                    .size(11.5)
+                    .color(Color32::from_white_alpha(166)),
+            );
+            ui.add_space(7.0);
+            ui.horizontal(|ui| {
+                if btn(ui, "Принять",   true).clicked()  { accept = true; }
+                if btn(ui, "Отклонить", false).clicked() { reject = true; }
+            });
+        });
+
+    ui.add_space(10.0);
+
+    if accept { accept_pairing(sync, &req); }
+    if reject { reject_pairing(sync, &req.device_id); }
+}
+
+fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut SyncHandle) {
+    block_title(ui, "Это устройство");
+
+    ui.horizontal(|ui| {
+        // Icon placeholder — replaced with a PNG in a later step.
+        let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
+        ui.painter().rect_filled(rect, 6.0, Color32::from_white_alpha(15));
+        ui.add_space(10.0);
+
+        ui.vertical(|ui| {
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut state.device_name_buf)
+                    .font(egui::FontId::proportional(13.0))
+                    .text_color(Color32::from_white_alpha(210))
+                    .frame(false)
+                    .desired_width(f32::INFINITY),
+            );
+            if resp.lost_focus() {
+                let trimmed = state.device_name_buf.trim().to_owned();
+                if !trimmed.is_empty() {
+                    *sync.shared.device_name.write().unwrap() = trimmed.clone();
+                    sync.identity.device_name                 = trimmed;
+                    sync.identity.save(&crate::app_dir());
+                } else {
+                    // Revert to saved name if the field was cleared.
+                    state.device_name_buf = sync.identity.device_name.clone();
+                }
+            }
+
+            let ip_text = match &sync.local_ip {
+                Some(ip) => format!("{ip} · порт {PORT}"),
+                None     => format!("порт {PORT}"),
+            };
+            ui.label(
+                RichText::new(ip_text)
+                    .size(10.0)
+                    .color(Color32::from_white_alpha(72)),
+            );
+        });
+    });
+}
+
+fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
+    block_title(ui, "Подключённые устройства");
+
+    let peers    = sync.shared.peers.read().unwrap().all().to_vec();
+    let statuses = sync.shared.sync_status.lock().unwrap().peer_statuses.clone();
+    let mut to_remove: Option<String> = None;
+
+    if peers.is_empty() {
+        ui.label(
+            RichText::new("Нет подключённых устройств")
+                .size(11.5)
+                .color(Color32::from_white_alpha(51)),
+        );
+    } else {
+        for (i, peer) in peers.iter().enumerate() {
+            let status = statuses.get(&peer.device_id).cloned().unwrap_or_default();
+            let (dot_color, meta_text, meta_err) = peer_display(peer, &status);
+            let is_last = i == peers.len() - 1;
+            let mut disconnect = false;
+
+            ui.horizontal(|ui| {
+                // Status dot
+                let dot_pos = ui.next_widget_position() + vec2(3.0, 11.0);
+                ui.allocate_exact_size(vec2(8.0, 22.0), Sense::hover());
+                ui.painter().circle_filled(dot_pos, 3.0, dot_color);
+                ui.add_space(4.0);
+
+                ui.vertical(|ui| {
+                    ui.add_space(3.0);
+                    ui.label(
+                        RichText::new(&peer.device_name)
+                            .size(12.5)
+                            .color(Color32::from_white_alpha(184)),
+                    );
+                    let meta_color = if meta_err {
+                        Color32::from_rgba_unmultiplied(220, 60, 60, 180)
+                    } else {
+                        Color32::from_white_alpha(72)
+                    };
+                    ui.label(RichText::new(&meta_text).size(10.0).color(meta_color));
+                    ui.add_space(3.0);
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let dis = ui.add(
+                        egui::Label::new(
+                            RichText::new("Отключить")
+                                .size(10.0)
+                                .color(Color32::from_rgba_unmultiplied(255, 80, 80, 115)),
+                        )
+                        .sense(Sense::click())
+                        .selectable(false),
+                    );
+                    if dis.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        // Overdraw with brighter color on hover.
+                        ui.painter().text(
+                            dis.rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Отключить",
+                            egui::FontId::proportional(10.0),
+                            Color32::from_rgba_unmultiplied(255, 80, 80, 217),
+                        );
+                    }
+                    if dis.clicked() { disconnect = true; }
+                });
+            });
+
+            if disconnect { to_remove = Some(peer.device_id.clone()); }
+
+            if !is_last {
+                let y = ui.next_widget_position().y;
+                ui.painter().hline(0.0..=crate::settings::SW, y, (0.5, crate::SEP));
+            }
+        }
+    }
+
+    if let Some(id) = to_remove {
+        sync.shared.peers.write().unwrap().remove(&id);
+    }
+}
+
+fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState) {
+    let scanning = matches!(state.scan_state, ScanState::Scanning { .. });
+
+    ui.horizontal(|ui| {
+        block_title_inline(ui, "Найти устройства");
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if btn(ui, "Сканировать", false).clicked() && !scanning {
+                state.scan_state = ScanState::Scanning { started_at: Instant::now() };
+            }
+        });
+    });
+    ui.add_space(4.0);
+
+    // Evaluate transition before borrowing scan_state for drawing.
+    let should_finish = if let ScanState::Scanning { started_at } = &state.scan_state {
+        started_at.elapsed().as_secs_f32() >= 1.8
+    } else {
+        false
+    };
+    if should_finish {
+        state.scan_state = ScanState::Empty; // Stage 4: replace with real discovered peers.
+    }
+
+    match &state.scan_state {
+        ScanState::Idle => {}
+
+        ScanState::Scanning { started_at } => {
+            ui.ctx().request_repaint();
+            let elapsed = started_at.elapsed().as_secs_f32();
+            let pulse   = (elapsed * std::f32::consts::TAU).sin() * 0.5 + 0.5;
+            let alpha   = (64.0 + pulse * 128.0) as u8;
+            ui.horizontal(|ui| {
+                let dot_pos = ui.next_widget_position() + vec2(3.0, 7.0);
+                ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
+                ui.painter().circle_filled(
+                    dot_pos, 2.5,
+                    Color32::from_rgba_unmultiplied(59, 130, 246, alpha),
+                );
+                ui.label(
+                    RichText::new("Поиск устройств...")
+                        .size(10.5)
+                        .color(Color32::from_white_alpha(64)),
+                );
+            });
+        }
+
+        ScanState::Results(found) => {
+            for peer in found {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(&peer.device_name)
+                            .size(12.5)
+                            .color(Color32::from_white_alpha(153)),
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if btn(ui, "Подключить", true).clicked() {
+                            // Stage 4: send pairing request to peer.ip
+                        }
+                    });
+                });
+            }
+        }
+
+        ScanState::Empty => {
+            ui.label(
+                RichText::new("Устройств не найдено")
+                    .size(10.5)
+                    .color(Color32::from_white_alpha(64)),
+            );
+        }
+    }
+}
+
+fn draw_sync_now(ui: &mut egui::Ui, sync: &mut SyncHandle) {
+    let last_sync = sync.shared.peers.read().unwrap()
+        .all().iter()
+        .filter_map(|p| p.last_synced_at)
+        .max();
+
+    let time_text = match last_sync {
+        Some(ts) => format!("Синхронизирован {}", format_ago(ts)),
+        None     => "Нет данных о синхронизации".to_owned(),
+    };
+
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(time_text)
+                .size(10.5)
+                .color(Color32::from_white_alpha(64)),
+        );
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if btn(ui, "Синхронизировать", false).clicked() {
+                sync.shared.ping_tx.try_send(()).ok();
+            }
+        });
+    });
+}
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String, bool) {
+    if status.revoked {
+        return (Color32::from_rgb(200, 45, 45), "Отключён с той стороны".to_owned(), true);
+    }
+    if status.error {
+        return (Color32::from_white_alpha(46), "Недоступен".to_owned(), true);
+    }
+    let meta = peer.last_synced_at
+        .map(format_ago)
+        .unwrap_or_else(|| "ожидание…".to_owned());
+    if status.online {
+        (Color32::from_rgb(34, 197, 94), meta, false)
+    } else {
+        (Color32::from_white_alpha(46), meta, false)
+    }
+}
+
+fn format_ago(ts: u64) -> String {
+    let now  = crate::project::current_time();
+    let diff = now.saturating_sub(ts);
+    match diff {
+        0..=59       => "только что".to_owned(),
+        60..=3599    => format!("{} мин назад",  diff / 60),
+        3600..=86399 => format!("{} ч назад",    diff / 3600),
+        _            => format!("{} дн назад",   diff / 86400),
+    }
+}
+
+fn sep(ui: &mut egui::Ui) {
+    ui.add_space(12.0);
+    let y = ui.next_widget_position().y;
+    ui.painter().hline(0.0..=crate::settings::SW, y, (0.5, crate::SEP));
+    ui.add_space(12.0);
+}
+
+fn block_title(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(10.0)
+            .color(Color32::from_white_alpha(64)),
+    );
+    ui.add_space(6.0);
+}
+
+/// Variant of `block_title` without bottom spacing — used in horizontal rows.
+fn block_title_inline(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text.to_uppercase())
+            .size(10.0)
+            .color(Color32::from_white_alpha(64)),
+    );
+}
+
+fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
+    let (fill, text_color) = if primary {
+        (
+            Color32::from_rgba_unmultiplied(59, 130, 246, 64),
+            Color32::from_white_alpha(166),
+        )
+    } else {
+        (
+            Color32::from_white_alpha(18),
+            Color32::from_white_alpha(115),
+        )
+    };
+    ui.add(
+        egui::Button::new(RichText::new(text).size(10.5).color(text_color))
+            .fill(fill)
+            .stroke(egui::Stroke::NONE)
+            .rounding(4.0),
+    )
+}
+
+fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
+    let entry = PeerEntry {
+        device_id:      req.device_id.clone(),
+        device_name:    req.device_name.clone(),
+        token:          req.token.clone(),
+        ip_hint:        Some(req.from_ip.clone()),
+        last_synced_at: None,
+    };
+    sync.shared.peers.write().unwrap().add(entry);
+    reject_pairing(sync, &req.device_id);
+}
+
+fn reject_pairing(sync: &mut SyncHandle, device_id: &str) {
+    sync.shared.pending_pairings.lock().unwrap()
+        .retain(|r| r.device_id != device_id);
+}

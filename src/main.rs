@@ -6,6 +6,27 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub mod settings;
 pub mod project;
 pub mod sync;
+pub mod ui;
+
+// ── File logger (GUI app has no console on Windows) ──────────────────────────
+
+static LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn write_log(msg: &str) {
+    let Some(path) = LOG_PATH.get() else { return };
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default().as_secs();
+        let _ = writeln!(f, "[{ts}] {msg}");
+    }
+}
+
+#[macro_export]
+macro_rules! clog {
+    ($($arg:tt)*) => { crate::write_log(&format!($($arg)*)) };
+}
 
 use eframe::egui::{
     self, Align, Color32, ImageSource, Layout, RichText,
@@ -190,6 +211,7 @@ const PROJECT_PALETTE: &[Color32] = &[
 
 struct App {
     settings:              settings::Settings,
+    settings_ui:           settings::SettingsUiState,
     sync:                  sync::SyncHandle,
     screen:                Screen,
     adding:                bool,
@@ -223,7 +245,7 @@ impl App {
             projects.push(project::create_default_project());
         }
 
-        let sync = sync::SyncHandle::init(&mut projects);
+        let sync = sync::SyncHandle::init(&mut projects, cc.egui_ctx.clone());
 
         let last_id    = settings.last_project_id.clone();
         let active_idx = last_id.as_deref()
@@ -240,6 +262,7 @@ impl App {
 
         let mut app = Self {
             settings,
+            settings_ui:           settings::SettingsUiState::default(),
             sync,
             screen:                Screen::Main,
             adding:                false,
@@ -281,6 +304,40 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // ── drain incoming sync ops (written by engine thread) ────────────
+        {
+            let mut dirty: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            while let Ok(ops) = self.sync.ops_rx.try_recv() {
+                for op in ops {
+                    if let Some(pid) = sync::apply::apply_op(
+                        &op, &mut self.projects,
+                        &mut self.sync.tombstones,
+                        &mut self.settings,
+                        &mut self.sync.seen_ops,
+                    ) { dirty.insert(pid); }
+                }
+            }
+            for pid in &dirty {
+                if let Some(p) = self.projects.iter().find(|p| p.id == *pid) {
+                    p.save();
+                }
+            }
+            // A synced DeleteProject may have shrunk `projects` — guard the active index.
+            if self.projects.is_empty() {
+                self.projects.push(project::create_default_project());
+                self.active_project_idx = 0;
+                self.settings.last_project_id = Some(self.projects[0].id.clone());
+                self.settings.save();
+            } else if self.active_project_idx >= self.projects.len() {
+                self.active_project_idx = self.projects.len() - 1;
+                self.settings.last_project_id = Some(self.projects[self.active_project_idx].id.clone());
+                self.settings.save();
+            }
+        }
+        // Fallback: wake egui periodically in case no sync activity.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
         let window_focused = ctx.input(|i| i.focused);
         if window_focused && !self.adding {
@@ -349,7 +406,13 @@ impl eframe::App for App {
         }
 
         if let Screen::Settings = self.screen {
-            if settings::draw_settings_ui(&ctx, ui, &mut self.settings) {
+            let (close, target_h) = settings::draw_settings_ui(
+                &ctx, ui, &mut self.settings, &mut self.settings_ui, &mut self.sync,
+            );
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                vec2(settings::SW, target_h),
+            ));
+            if close {
                 self.screen = Screen::Main;
                 self.last_h = 0.0;
             }
@@ -690,7 +753,7 @@ impl eframe::App for App {
                     self.project_buf.clear();
                     self.screen = Screen::Settings;
                     ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                        vec2(settings::SW, settings::SH),
+                        vec2(settings::SW, settings::SH_GENERAL),
                     ));
                 }
 
@@ -997,6 +1060,11 @@ impl eframe::App for App {
 
 fn main() -> eframe::Result<()> {
     let _ = std::fs::create_dir_all(app_dir());
+    // Init file logger before anything else — GUI apps have no console on Windows.
+    LOG_PATH.set(app_dir().join("debug.log")).ok();
+    // Truncate log on each run so it doesn't grow forever during debugging.
+    let _ = std::fs::write(app_dir().join("debug.log"), "");
+    clog!("=== Cue started ===");
 
     if let Some(lock) = read_lock() {
         if lock_is_fresh(&lock) && is_alive(lock.pid) {

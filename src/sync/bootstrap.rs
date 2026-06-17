@@ -10,7 +10,11 @@ pub fn run_if_needed(
     identity: &DeviceIdentity,
     oplog:    &mut OpLog,
 ) {
-    if oplog.next_seq > 1 { return; }
+    if oplog.next_seq > 1 {
+        crate::clog!("[bootstrap] skipped, next_seq={}", oplog.next_seq);
+        return;
+    }
+    crate::clog!("[bootstrap] running for {} projects", projects.len());
 
     for proj in projects.iter_mut() {
         for (i, task) in proj.main.values_mut().enumerate() {

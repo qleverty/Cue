@@ -2,10 +2,15 @@ use serde::{Deserialize, Serialize};
 use eframe::egui::{
     self, Color32, RichText, Sense, ViewportCommand, vec2,
 };
-use super::{BG, SEP};
+use super::BG;
 
 pub const SW: f32 = 300.0;
-pub const SH: f32 = 200.0;
+
+pub const SH_GENERAL:  f32 = 200.0;
+pub const SH_PROJECTS: f32 = 160.0;
+pub const SH_SYNC:     f32 = 310.0;
+
+// ── Settings data ─────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 pub enum NewTaskPos {
@@ -23,7 +28,7 @@ pub struct Settings {
     pub last_project_id:  Option<String>,
     #[serde(default)]
     pub last_width:       Option<f32>,
-	#[serde(default)]
+    #[serde(default)]
     pub last_pos:         Option<[f32; 2]>,
 }
 
@@ -35,7 +40,7 @@ impl Default for Settings {
             reset_on_startup: false,
             last_project_id:  None,
             last_width:       None,
-			last_pos:         None,
+            last_pos:         None,
         }
     }
 }
@@ -57,15 +62,50 @@ impl Settings {
     }
 }
 
+// ── UI state ──────────────────────────────────────────────────────────────────
+
+#[derive(Clone, PartialEq, Default)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Projects,
+    Sync,
+}
+
+#[derive(Default)]
+pub struct SettingsUiState {
+    pub tab:        SettingsTab,
+    pub sync_panel: crate::ui::settings::sync_panel::SyncPanelState,
+}
+
+impl SettingsUiState {
+    pub fn target_height(&self) -> f32 {
+        match self.tab {
+            SettingsTab::General  => SH_GENERAL,
+            SettingsTab::Projects => SH_PROJECTS,
+            SettingsTab::Sync     => SH_SYNC,
+        }
+    }
+}
+
+// ── Draw ──────────────────────────────────────────────────────────────────────
+
+/// Returns `(close, target_height)`.
+/// `target_height` is the desired inner window height for the active tab —
+/// the caller can forward it to `ViewportCommand::InnerSize` (Step 7).
 pub fn draw_settings_ui(
-    ctx: &egui::Context,
-    ui:  &mut egui::Ui,
+    ctx:      &egui::Context,
+    ui:       &mut egui::Ui,
     settings: &mut Settings,
-) -> bool {
+    state:    &mut SettingsUiState,
+    sync:     &mut crate::sync::SyncHandle,
+) -> (bool, f32) {
     let mut close = false;
 
     ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+
+    // ── titlebar ──────────────────────────────────────────────────────────────
 
     let bar_rect = egui::Rect::from_min_size(
         ui.next_widget_position(), vec2(SW, 12.0));
@@ -82,10 +122,10 @@ pub fn draw_settings_ui(
         Color32::from_rgb(220, 50, 50)
     };
     {
-        let c = close_center;
-        let tip   = c + vec2( 4.0,  0.0);
-        let top   = c + vec2(-2.5, -3.8);
-        let bot   = c + vec2(-2.5,  3.8);
+        let c   = close_center;
+        let tip = c + vec2( 4.0,  0.0);
+        let top = c + vec2(-2.5, -3.8);
+        let bot = c + vec2(-2.5,  3.8);
         ui.painter().add(egui::Shape::convex_polygon(
             vec![tip, top, bot],
             close_col,
@@ -96,8 +136,8 @@ pub fn draw_settings_ui(
 
     let c = bar_rect.center();
     for x in [-6.0f32, 0.0, 6.0] {
-        ui.painter().circle_filled(c + vec2(x, 4.0), 1.5,
-            Color32::from_white_alpha(35));
+        ui.painter().circle_filled(
+            c + vec2(x, 4.0), 1.5, Color32::from_white_alpha(35));
     }
 
     {
@@ -112,66 +152,46 @@ pub fn draw_settings_ui(
         );
     }
 
+    // ── tab bar ───────────────────────────────────────────────────────────────
+
     ui.add_space(14.0);
-    ui.visuals_mut().selection.bg_fill = Color32::from_rgb(86, 111, 146);
-
-    let mut changed = false;
-
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        ui.label(RichText::new("При создании новых задач:")
-            .color(Color32::from_white_alpha(120)).size(11.0));
-    });
-    ui.add_space(6.0);
-
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        if ui.add(egui::RadioButton::new(
-            settings.new_task_pos == NewTaskPos::End, "")).clicked()
-        {
-            settings.new_task_pos = NewTaskPos::End;
-            changed = true;
+        for (label, tab) in [
+            ("Основные",       SettingsTab::General),
+            ("Проекты",        SettingsTab::Projects),
+            ("Синхронизация",  SettingsTab::Sync),
+        ] {
+            let active = state.tab == tab;
+            let color  = if active {
+                Color32::from_white_alpha(220)
+            } else {
+                Color32::from_white_alpha(90)
+            };
+            let resp = ui.add(
+                egui::Label::new(RichText::new(label).color(color).size(12.0))
+                    .sense(Sense::click()),
+            );
+            if resp.clicked() { state.tab = tab; }
+            ui.add_space(12.0);
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Перемещать в конец списка")
-            .color(Color32::from_gray(190)).size(13.0));
-    });
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        if ui.add(egui::RadioButton::new(
-            settings.new_task_pos == NewTaskPos::Beginning, "")).clicked()
-        {
-            settings.new_task_pos = NewTaskPos::Beginning;
-            changed = true;
-        }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Перемещать в начало списка")
-            .color(Color32::from_gray(190)).size(13.0));
-    });
-    ui.add_space(6.0);
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        if ui.checkbox(&mut settings.replace_main, "").changed() { changed = true; }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Ставить на место главной задачи")
-            .color(Color32::from_gray(190)).size(13.0));
     });
 
-    ui.add_space(12.0);
+    ui.add_space(6.0);
     let y = ui.next_widget_position().y;
-    ui.painter().hline(14.0..=(SW - 14.0), y, (0.5, SEP));
-    ui.add_space(12.0);
+    ui.painter().hline(14.0..=(SW - 14.0), y, (0.5, crate::SEP));
+    ui.add_space(1.0);
 
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        if ui.checkbox(&mut settings.reset_on_startup, "").changed() { changed = true; }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Сбрасывать список задач при перезаходе")
-            .color(Color32::from_gray(190)).size(13.0));
-    });
+    // ── tab content ───────────────────────────────────────────────────────────
 
-    if changed { settings.save(); }
+    match state.tab {
+        SettingsTab::General  =>
+            { crate::ui::settings::general::draw(ui, settings); }
+        SettingsTab::Projects =>
+            { crate::ui::settings::projects::draw(ui); }
+        SettingsTab::Sync     =>
+            { crate::ui::settings::sync_panel::draw(ui, &mut state.sync_panel, sync); }
+    }
 
-    close
+    (close, state.target_height())
 }
