@@ -2,22 +2,21 @@ use std::time::Instant;
 
 use eframe::egui::{self, Color32, RichText, Sense, vec2};
 
-use crate::sync::{server::{PairingRequest, PORT}, peers::PeerEntry, PeerStatus, SyncHandle};
+use crate::sync::{
+    discovery,
+    server::{PairingRequest, PORT},
+    peers::PeerEntry,
+    PeerStatus,
+    SyncHandle,
+};
 
 // ── state ─────────────────────────────────────────────────────────────────────
 
-/// A device found on the LAN. Stage 4 will populate these via discovery.
-pub struct DiscoveredPeer {
-    pub device_id:   String,
-    pub device_name: String,
-    pub ip:          String,
-}
-
 pub enum ScanState {
     Idle,
-    /// Active scan; `started_at` drives the dot animation and stub timeout.
+    /// Active scan; `started_at` drives the dot animation.
     Scanning { started_at: Instant },
-    Results(Vec<DiscoveredPeer>),
+    Results(Vec<discovery::DiscoveredPeer>),
     Empty,
 }
 
@@ -62,7 +61,7 @@ pub fn draw(
             sep(ui);
             draw_peers(ui, sync);
             sep(ui);
-            draw_discovery(ui, state);
+            draw_discovery(ui, state, sync);
             sep(ui);
             draw_sync_now(ui, sync);
         });
@@ -230,13 +229,15 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
     }
 }
 
-fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState) {
+fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut SyncHandle) {
     let scanning = matches!(state.scan_state, ScanState::Scanning { .. });
 
     ui.horizontal(|ui| {
         block_title_inline(ui, "Найти устройства");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if btn(ui, "Сканировать", false).clicked() && !scanning {
+                let name = sync.shared.device_name.read().unwrap().clone();
+                discovery::send_ping(&sync.shared.device_id, &name);
                 state.scan_state = ScanState::Scanning { started_at: Instant::now() };
             }
         });
@@ -250,7 +251,21 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState) {
         false
     };
     if should_finish {
-        state.scan_state = ScanState::Empty; // Stage 4: replace with real discovered peers.
+        let found = discovery::current(&sync.shared.discovered);
+        // Filter out already-paired peers.
+        let paired_ids: std::collections::HashSet<_> = sync.shared.peers
+            .read().unwrap()
+            .all().iter()
+            .map(|p| p.device_id.clone())
+            .collect();
+        let filtered: Vec<_> = found.into_iter()
+            .filter(|p| !paired_ids.contains(&p.device_id))
+            .collect();
+        state.scan_state = if filtered.is_empty() {
+            ScanState::Empty
+        } else {
+            ScanState::Results(filtered)
+        };
     }
 
     match &state.scan_state {
@@ -286,7 +301,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState) {
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if btn(ui, "Подключить", true).clicked() {
-                            // Stage 4: send pairing request to peer.ip
+                            send_pairing_request(sync, peer);
                         }
                     });
                 });
@@ -405,6 +420,65 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     )
 }
 
+fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer) {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let token    = crate::project::gen_id();
+    let our_id   = sync.shared.device_id.clone();
+    let our_name = sync.shared.device_name.read().unwrap().clone();
+
+    // Register the peer locally first so our server accepts their pulls.
+    let entry = PeerEntry {
+        device_id:      peer.device_id.clone(),
+        device_name:    peer.device_name.clone(),
+        token:          token.clone(),
+        ip_hint:        Some(peer.ip.clone()),
+        last_synced_at: None,
+    };
+    sync.shared.peers.write().unwrap().add(entry);
+
+    // POST /request_sync to the peer in a background thread.
+    let ip      = peer.ip.clone();
+    let peer_id = peer.device_id.clone();
+    let port    = crate::sync::server::PORT;
+    std::thread::spawn(move || {
+        let addr = format!("{ip}:{port}");
+        let body = serde_json::json!({
+            "device_id":   our_id,
+            "device_name": our_name,
+            "token":       token,
+        }).to_string();
+        let req = format!(
+            "POST /1/request_sync HTTP/1.0
+Host: {addr}
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{}",
+            body.len(), body
+        );
+        match TcpStream::connect_timeout(
+            &addr.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
+            Duration::from_secs(5),
+        ) {
+            Ok(mut stream) => {
+                let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                let _ = stream.write_all(req.as_bytes());
+                let mut buf = [0u8; 64];
+                let _ = stream.read(&mut buf);
+                crate::clog!("[sync_panel] request_sync → {peer_id} ok");
+            }
+            Err(e) => crate::clog!("[sync_panel] request_sync → {peer_id} FAILED: {e}"),
+        }
+    });
+
+    // Wake engine for immediate pull attempt.
+    sync.shared.ping_tx.try_send(()).ok();
+}
+
 fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
     let entry = PeerEntry {
         device_id:      req.device_id.clone(),
@@ -415,6 +489,8 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
     };
     sync.shared.peers.write().unwrap().add(entry);
     reject_pairing(sync, &req.device_id);
+    // Wake engine so first pull happens immediately.
+    sync.shared.ping_tx.try_send(()).ok();
 }
 
 fn reject_pairing(sync: &mut SyncHandle, device_id: &str) {

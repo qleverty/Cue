@@ -8,7 +8,7 @@ pub mod peers;
 pub mod server;
 pub mod engine;
 
-// Stage 4+: pub mod discovery;
+pub mod discovery;
 
 use std::collections::{HashMap, HashSet};
 use std::net::UdpSocket;
@@ -83,6 +83,11 @@ impl SyncHandle {
         let peers_loaded = peers::Peers::load(&dir);
         crate::clog!("[sync] peers loaded count={}", peers_loaded.all().len());
 
+        let discovered = discovery::start(
+            identity.device_id.clone(),
+            Arc::new(RwLock::new(identity.device_name.clone())),
+        );
+
         let shared = Arc::new(SharedState {
             device_id:        identity.device_id.clone(),
             device_name:      RwLock::new(identity.device_name.clone()),
@@ -90,6 +95,7 @@ impl SyncHandle {
             oplog_path:       dir.join("ops.ndjson"),
             pending_pairings: Mutex::new(Vec::new()),
             sync_status:      Mutex::new(SyncStatus::default()),
+            discovered,
             ping_tx,
             egui_ctx,
         });
