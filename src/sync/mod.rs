@@ -87,6 +87,7 @@ impl SyncHandle {
             identity.device_id.clone(),
             Arc::new(RwLock::new(identity.device_name.clone())),
         );
+        crate::clog!("[sync] discovery started");
 
         let shared = Arc::new(SharedState {
             device_id:        identity.device_id.clone(),

@@ -236,8 +236,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
         block_title_inline(ui, "Найти устройства");
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if btn(ui, "Сканировать", false).clicked() && !scanning {
-                let name = sync.shared.device_name.read().unwrap().clone();
-                discovery::send_ping(&sync.shared.device_id, &name);
+                sync.shared.discovered.send_ping();
                 state.scan_state = ScanState::Scanning { started_at: Instant::now() };
             }
         });
@@ -251,7 +250,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
         false
     };
     if should_finish {
-        let found = discovery::current(&sync.shared.discovered);
+        let found = crate::sync::discovery::current(&sync.shared.discovered.discovered);
         // Filter out already-paired peers.
         let paired_ids: std::collections::HashSet<_> = sync.shared.peers
             .read().unwrap()

@@ -20,8 +20,8 @@ pub struct SharedState {
     pub oplog_path:       PathBuf,
     pub pending_pairings: Mutex<Vec<PairingRequest>>,
     pub sync_status:      Mutex<super::SyncStatus>,
-    /// Live list of devices found via UDP discovery.
-    pub discovered:       super::discovery::DiscoveredList,
+    /// UDP discovery handle — exposes discovered list and ping trigger.
+    pub discovered:       super::discovery::Discovery,
     /// Bounded-1 channel: server taps engine on POST /ping_sync.
     pub ping_tx:          mpsc::SyncSender<()>,
     /// Used by engine to wake egui immediately after delivering ops.
