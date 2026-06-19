@@ -35,14 +35,16 @@ impl Discovery {
 pub fn start(
     our_device_id:   String,
     our_device_name: Arc<RwLock<String>>,
+    local_ip:        Option<String>,
 ) -> Discovery {
     let discovered: DiscoveredList = Arc::new(Mutex::new(Vec::new()));
     let discovered_clone           = Arc::clone(&discovered);
     let (ping_tx, ping_rx)         = mpsc::sync_channel::<()>(1);
+    let broadcast                  = subnet_broadcast(local_ip.as_deref());
 
     std::thread::Builder::new()
         .name("cue-discovery".into())
-        .spawn(move || run(our_device_id, our_device_name, discovered_clone, ping_rx))
+        .spawn(move || run(our_device_id, our_device_name, discovered_clone, ping_rx, broadcast))
         .expect("spawn discovery thread");
 
     Discovery { discovered, ping_tx }
@@ -61,10 +63,11 @@ pub fn current(list: &DiscoveredList) -> Vec<DiscoveredPeer> {
 // ── listener loop ─────────────────────────────────────────────────────────────
 
 fn run(
-    our_id:   String,
-    our_name: Arc<RwLock<String>>,
-    list:     DiscoveredList,
-    ping_rx:  mpsc::Receiver<()>,
+    our_id:    String,
+    our_name:  Arc<RwLock<String>>,
+    list:      DiscoveredList,
+    ping_rx:   mpsc::Receiver<()>,
+    broadcast: String,
 ) {
     let sock = match bind_socket() {
         Some(s) => s,
@@ -78,7 +81,7 @@ fn run(
         if ping_rx.try_recv().is_ok() {
             let our_name_str = our_name.read().unwrap().clone();
             let msg = format!("CUE_PING {our_id} {our_name_str}");
-            match sock.send_to(msg.as_bytes(), format!("255.255.255.255:{UDP_PORT}")) {
+            match sock.send_to(msg.as_bytes(), format!("{broadcast}:{UDP_PORT}")) {
                 Ok(_)  => crate::clog!("[discovery] sent CUE_PING"),
                 Err(e) => crate::clog!("[discovery] send_ping failed: {e}"),
             }
@@ -132,6 +135,21 @@ fn run(
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// Derive the subnet broadcast from a local IP, assuming /24.
+/// Falls back to 255.255.255.255 if the IP can't be parsed.
+fn subnet_broadcast(local_ip: Option<&str>) -> String {
+    let ip = match local_ip {
+        Some(s) => s,
+        None    => return "255.255.255.255".to_owned(),
+    };
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() == 4 {
+        format!("{}.{}.{}.255", parts[0], parts[1], parts[2])
+    } else {
+        "255.255.255.255".to_owned()
+    }
+}
 
 fn bind_socket() -> Option<UdpSocket> {
     let addr = format!("0.0.0.0:{UDP_PORT}");

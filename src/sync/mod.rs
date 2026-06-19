@@ -32,12 +32,39 @@ pub struct SyncStatus {
     pub peer_statuses: HashMap<String, PeerStatus>,
 }
 
-/// Classic UDP trick: bind a socket, "connect" to an external address
-/// (no data is sent), then read back the local address the OS chose.
+/// Returns the local LAN (RFC1918 private) IP by probing common gateway
+/// addresses. Falls back to the default route if no private IP is found.
 pub fn get_lan_ip() -> Option<String> {
-    let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("8.8.8.8:80").ok()?;
-    Some(socket.local_addr().ok()?.ip().to_string())
+    // Try common LAN gateway addresses first — routing to these will
+    // always pick the LAN interface, not a VPN.
+    let candidates = ["192.168.1.1:80", "192.168.0.1:80", "10.0.0.1:80", "172.16.0.1:80", "8.8.8.8:80"];
+    for target in candidates {
+        let socket = match UdpSocket::bind("0.0.0.0:0") {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if socket.connect(target).is_err() { continue; }
+        if let Ok(addr) = socket.local_addr() {
+            let ip = addr.ip().to_string();
+            if is_private_ip(&ip) {
+                return Some(ip);
+            }
+        }
+    }
+    None
+}
+
+fn is_private_ip(ip: &str) -> bool {
+    let parts: Vec<u8> = ip.split('.')
+        .filter_map(|p| p.parse().ok())
+        .collect();
+    if parts.len() != 4 { return false; }
+    match (parts[0], parts[1]) {
+        (10, _)                    => true,  // 10.0.0.0/8
+        (172, 16..=31)             => true,  // 172.16.0.0/12
+        (192, 168)                 => true,  // 192.168.0.0/16
+        _                          => false,
+    }
 }
 
 pub struct SyncHandle {
@@ -83,9 +110,11 @@ impl SyncHandle {
         let peers_loaded = peers::Peers::load(&dir);
         crate::clog!("[sync] peers loaded count={}", peers_loaded.all().len());
 
+        let local_ip   = get_lan_ip();
         let discovered = discovery::start(
             identity.device_id.clone(),
             Arc::new(RwLock::new(identity.device_name.clone())),
+            local_ip.clone(),
         );
         crate::clog!("[sync] discovery started");
 
@@ -105,7 +134,6 @@ impl SyncHandle {
         engine::start(Arc::clone(&shared), Arc::clone(&cursors), ops_tx, ping_rx);
         engine::start_notifier(Arc::clone(&shared), notify_rx);
 
-        let local_ip = get_lan_ip();
         crate::clog!("[sync] local_ip={:?}", local_ip);
 
         Self { identity, tombstones, oplog, cursors, seen_ops, ops_rx, shared, notify_tx, local_ip }
