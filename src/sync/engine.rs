@@ -96,7 +96,23 @@ fn pull_all(
 
         match http_get(&url, HTTP_TIMEOUT) {
             Ok(body) => {
-                // Successful connection — update last_synced_at and mark online.
+                // Successful connection — update last_synced_at, name, ip and mark online.
+                {
+                    let hello_url = format!("http://{ip}:{}/1/hello", super::server::PORT);
+                    if let Ok(body) = http_get(&hello_url, HTTP_TIMEOUT) {
+                        #[derive(serde::Deserialize)]
+                        struct Hello { device_name: String }
+                        if let Ok(h) = serde_json::from_str::<Hello>(&body) {
+                            let mut peers = state.peers.write().unwrap();
+                            if let Some(p) = peers.list_mut().find(|p| p.device_id == peer.device_id) {
+                                if p.device_name != h.device_name {
+                                    p.device_name = h.device_name;
+                                    peers.save();
+                                }
+                            }
+                        }
+                    }
+                }
                 state.peers.write().unwrap().update_last_synced(&peer.device_id, now_ts);
                 state.sync_status.lock().unwrap().peer_statuses.insert(
                     peer.device_id.clone(),

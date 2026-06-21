@@ -123,7 +123,7 @@ impl SyncHandle {
             device_name:      RwLock::new(identity.device_name.clone()),
             peers:            RwLock::new(peers_loaded),
             oplog_path:       dir.join("ops.ndjson"),
-            pending_pairings: Mutex::new(Vec::new()),
+            pending_pairings: Mutex::new(server::load_pending_pairings(&dir)),
             sync_status:      Mutex::new(SyncStatus::default()),
             discovered,
             ping_tx,

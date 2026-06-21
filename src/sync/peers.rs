@@ -34,6 +34,10 @@ impl Peers {
 
     pub fn all(&self) -> &[PeerEntry] { &self.list }
 
+    pub fn list_mut(&mut self) -> impl Iterator<Item = &mut PeerEntry> {
+        self.list.iter_mut()
+    }
+
     pub fn find_by_token(&self, token: &str) -> Option<&PeerEntry> {
         self.list.iter().find(|p| p.token == token)
     }

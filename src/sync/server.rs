@@ -28,7 +28,7 @@ pub struct SharedState {
     pub egui_ctx:         egui::Context,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct PairingRequest {
     pub device_id:   String,
     pub device_name: String,
@@ -66,6 +66,7 @@ fn handle(req: Request, state: &SharedState) {
         (Method::Get,  "/1/hello")       => hello(req, state),
         (Method::Get,  "/1/ops")         => serve_ops(req, state, &params),
         (Method::Post, "/1/request_sync") => request_sync(req, state),
+        (Method::Post, "/1/accept_sync")   => accept_sync(req, state),
         (Method::Post, "/1/ping_sync")   => ping_sync(req, state, &params),
         _                               => respond(req, 404, ""),
     }
@@ -117,13 +118,42 @@ fn request_sync(mut req: Request, state: &SharedState) {
     }
 
     let from_ip = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
-    state.pending_pairings.lock().unwrap().push(PairingRequest {
-        device_id:   b.device_id,
-        device_name: b.device_name,
-        token:       b.token,
-        from_ip,
-    });
+    {
+        let mut pending = state.pending_pairings.lock().unwrap();
+        pending.push(PairingRequest {
+            device_id:   b.device_id,
+            device_name: b.device_name,
+            token:       b.token,
+            from_ip,
+        });
+        save_pending_pairings(state.oplog_path.parent().unwrap_or(std::path::Path::new(".")), &pending);
+    }
+    // Wake egui so the pairing banner appears immediately.
+    state.egui_ctx.request_repaint();
     respond(req, 202, "{}");
+}
+
+fn accept_sync(mut req: Request, state: &SharedState) {
+    #[derive(Deserialize)]
+    struct Body { device_id: String, device_name: String, token: String, from_ip: String }
+
+    let mut buf = String::new();
+    if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
+    let Ok(b) = serde_json::from_str::<Body>(&buf) else { respond(req, 400, ""); return; };
+
+    crate::clog!("[server] accept_sync from {} ip={}", b.device_id, b.from_ip);
+
+    let entry = super::peers::PeerEntry {
+        device_id:      b.device_id,
+        device_name:    b.device_name,
+        token:          b.token,
+        ip_hint:        Some(b.from_ip),
+        last_synced_at: None,
+    };
+    state.peers.write().unwrap().add(entry);
+    state.ping_tx.try_send(()).ok();
+    state.egui_ctx.request_repaint();
+    respond(req, 200, "{}");
 }
 
 fn ping_sync(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
@@ -159,4 +189,17 @@ fn respond_json(req: Request, code: u16, body: &str) {
             .with_status_code(StatusCode(code))
             .with_header(header),
     );
+}
+// ── pending pairings persistence ─────────────────────────────────────────────
+
+pub fn load_pending_pairings(dir: &std::path::Path) -> Vec<PairingRequest> {
+    std::fs::read_to_string(dir.join("pending_pairings.json")).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn save_pending_pairings(dir: &std::path::Path, list: &[PairingRequest]) {
+    if let Ok(j) = serde_json::to_string_pretty(list) {
+        let _ = std::fs::write(dir.join("pending_pairings.json"), j);
+    }
 }

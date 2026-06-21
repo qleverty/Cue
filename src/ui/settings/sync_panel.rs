@@ -419,26 +419,25 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     )
 }
 
+/// Token is derived deterministically from both device IDs so both sides
+/// independently compute the same value — avoids conflicts if both initiate.
+fn deterministic_token(id_a: &str, id_b: &str) -> String {
+    let (lo, hi) = if id_a < id_b { (id_a, id_b) } else { (id_b, id_a) };
+    format!("{lo}:{hi}")
+}
+
 fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer) {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
-    let token    = crate::project::gen_id();
     let our_id   = sync.shared.device_id.clone();
+    let token    = deterministic_token(&our_id, &peer.device_id);
     let our_name = sync.shared.device_name.read().unwrap().clone();
 
-    // Register the peer locally first so our server accepts their pulls.
-    let entry = PeerEntry {
-        device_id:      peer.device_id.clone(),
-        device_name:    peer.device_name.clone(),
-        token:          token.clone(),
-        ip_hint:        Some(peer.ip.clone()),
-        last_synced_at: None,
-    };
-    sync.shared.peers.write().unwrap().add(entry);
-
     // POST /request_sync to the peer in a background thread.
+    // NOTE: we do NOT add to trusted_peers yet — only after the peer accepts
+    // and we receive /accept_sync will we register them.
     let ip      = peer.ip.clone();
     let peer_id = peer.device_id.clone();
     let port    = crate::sync::server::PORT;
@@ -479,6 +478,7 @@ Connection: close
 }
 
 fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
+    // Add the initiator to our trusted peers.
     let entry = PeerEntry {
         device_id:      req.device_id.clone(),
         device_name:    req.device_name.clone(),
@@ -488,11 +488,56 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
     };
     sync.shared.peers.write().unwrap().add(entry);
     reject_pairing(sync, &req.device_id);
-    // Wake engine so first pull happens immediately.
     sync.shared.ping_tx.try_send(()).ok();
+
+    // Notify the initiator so they can add us to their trusted_peers.
+    let ip       = req.from_ip.clone();
+    let our_id   = sync.shared.device_id.clone();
+    let our_name = sync.shared.device_name.read().unwrap().clone();
+    let token    = req.token.clone();
+    let port     = crate::sync::server::PORT;
+    std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+        let addr = format!("{ip}:{port}");
+        let body = serde_json::json!({
+            "device_id":   our_id,
+            "device_name": our_name,
+            "token":       token,
+            "from_ip":     ip,
+        }).to_string();
+        let http = format!(
+            "POST /1/accept_sync HTTP/1.0
+Host: {addr}
+Content-Type: application/json
+Content-Length: {}
+Connection: close
+
+{}",
+            body.len(), body
+        );
+        match TcpStream::connect_timeout(
+            &addr.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
+            Duration::from_secs(5),
+        ) {
+            Ok(mut s) => {
+                let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+                let _ = s.write_all(http.as_bytes());
+                let mut buf = [0u8; 64];
+                let _ = s.read(&mut buf);
+                crate::clog!("[sync_panel] accept_sync sent to {ip} ok");
+            }
+            Err(e) => crate::clog!("[sync_panel] accept_sync to {ip} FAILED: {e}"),
+        }
+    });
 }
 
 fn reject_pairing(sync: &mut SyncHandle, device_id: &str) {
-    sync.shared.pending_pairings.lock().unwrap()
-        .retain(|r| r.device_id != device_id);
+    let mut pending = sync.shared.pending_pairings.lock().unwrap();
+    pending.retain(|r| r.device_id != device_id);
+    crate::sync::server::save_pending_pairings(
+        &crate::app_dir(),
+        &pending,
+    );
 }
