@@ -104,12 +104,18 @@ fn pull_all(
                         struct Hello { device_name: String }
                         if let Ok(h) = serde_json::from_str::<Hello>(&body) {
                             let mut peers = state.peers.write().unwrap();
-                            if let Some(p) = peers.list_mut().find(|p| p.device_id == peer.device_id) {
-                                if p.device_name != h.device_name {
-                                    p.device_name = h.device_name;
-                                    peers.save();
-                                }
-                            }
+                            let name_changed = peers.list_mut()
+                                .find(|p| p.device_id == peer.device_id)
+                                .map(|p| {
+                                    if p.device_name != h.device_name {
+                                        p.device_name = h.device_name;
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .unwrap_or(false);
+                            if name_changed { peers.save(); }
                         }
                     }
                 }
