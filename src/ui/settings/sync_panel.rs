@@ -449,13 +449,7 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
             "token":       token,
         }).to_string();
         let req = format!(
-            "POST /1/request_sync HTTP/1.0
-Host: {addr}
-Content-Type: application/json
-Content-Length: {}
-Connection: close
-
-{}",
+            "POST /1/request_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(), body
         );
         match TcpStream::connect_timeout(
@@ -464,6 +458,7 @@ Connection: close
         ) {
             Ok(mut stream) => {
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
                 let _ = stream.write_all(req.as_bytes());
                 let mut buf = [0u8; 64];
                 let _ = stream.read(&mut buf);
@@ -508,13 +503,7 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
             "from_ip":     ip,
         }).to_string();
         let http = format!(
-            "POST /1/accept_sync HTTP/1.0
-Host: {addr}
-Content-Type: application/json
-Content-Length: {}
-Connection: close
-
-{}",
+            "POST /1/accept_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
             body.len(), body
         );
         match TcpStream::connect_timeout(

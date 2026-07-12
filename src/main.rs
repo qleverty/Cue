@@ -181,7 +181,7 @@ fn confirm_delete(_name: &str) -> bool { true }
 
 // ── screen & palette ──────────────────────────────────────────────────────────
 
-enum Screen { Main, Settings }
+enum Screen { Main, Settings, Routine }
 
 fn add_target_for(s: &settings::Settings, main_empty: bool) -> sync::oplog::AddTarget {
     use settings::NewTaskPos;
@@ -212,6 +212,7 @@ const PROJECT_PALETTE: &[Color32] = &[
 struct App {
     settings:              settings::Settings,
     settings_ui:           settings::SettingsUiState,
+    routine_ui:            ui::routine::RoutineUiState,
     sync:                  sync::SyncHandle,
     screen:                Screen,
     adding:                bool,
@@ -263,6 +264,7 @@ impl App {
         let mut app = Self {
             settings,
             settings_ui:           settings::SettingsUiState::default(),
+            routine_ui:            ui::routine::RoutineUiState::default(),
             sync,
             screen:                Screen::Main,
             adding:                false,
@@ -411,6 +413,18 @@ impl eframe::App for App {
             );
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(
                 vec2(settings::SW, target_h),
+            ));
+            if close {
+                self.screen = Screen::Main;
+                self.last_h = 0.0;
+            }
+            return;
+        }
+
+        if let Screen::Routine = self.screen {
+            let close = ui::routine::draw(&ctx, ui, &self.routine_ui);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                vec2(ui::routine::RW, ui::routine::RH),
             ));
             if close {
                 self.screen = Screen::Main;
