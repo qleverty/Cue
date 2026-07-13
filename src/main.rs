@@ -883,7 +883,7 @@ impl eframe::App for App {
             .collect();
 
         if !sub_texts.is_empty() {
-            let (mut promote, mut delete) = (None::<usize>, None::<usize>);
+            let (mut promote, mut delete, mut open_routine) = (None::<usize>, None::<usize>, None::<usize>);
 
             let scroll_h = sub_texts.len().min(9) as f32 * (ROW - 5.0);
             egui::ScrollArea::vertical()
@@ -909,6 +909,21 @@ impl eframe::App for App {
                                     bytes: CROSS_PNG.into(),
                                 }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
                                 if btn_resp.clicked() { delete = Some(i); }
+
+                                ui.add_space(4.0);
+                                let (clk_rect, clk_resp) = ui.allocate_exact_size(
+                                    vec2(15.0, 15.0), Sense::click());
+                                let clk_tint = if clk_resp.hovered() {
+                                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                    Color32::WHITE
+                                } else {
+                                    Color32::from_gray(90)
+                                };
+                                ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
+                                    uri: "bytes://cross.png".into(),
+                                    bytes: CROSS_PNG.into(),
+                                }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
+                                if clk_resp.clicked() { open_routine = Some(i); }
 
                                 ui.add_space(6.0);
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
@@ -942,6 +957,17 @@ impl eframe::App for App {
                 }
                 self.projects[idx].promote_sub(i);
                 if !self.settings.reset_on_startup { self.projects[idx].save(); }
+            }
+            if let Some(i) = open_routine {
+                let idx = self.active_project_idx;
+                if let Some((task_id, task)) = self.projects[idx].subs.get_index(i) {
+                    self.routine_ui.task_id   = task_id.clone();
+                    self.routine_ui.task_name = task.text.clone();
+                }
+                self.screen = Screen::Routine;
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(
+                    vec2(ui::routine::RW, ui::routine::RH),
+                ));
             }
             if let Some(i) = delete {
                 if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {

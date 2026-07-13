@@ -154,7 +154,7 @@ pub fn draw_settings_ui(
 
     // ── tab bar ───────────────────────────────────────────────────────────────
 
-    ui.add_space(14.0);
+    ui.add_space(9.8);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         for (label, tab) in [

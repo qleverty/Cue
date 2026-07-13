@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, RichText, Sense, ViewportCommand, vec2};
+use eframe::egui::{self, Align2, Color32, FontId, Sense, Shape, Stroke, ViewportCommand, vec2};
 use crate::BG;
 
 pub const RW: f32 = 254.0;
@@ -23,39 +23,52 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &RoutineUiState) -> b
     let drag = ui.allocate_rect(bar_rect, Sense::drag());
     if drag.dragged() { ctx.send_viewport_cmd(ViewportCommand::StartDrag); }
 
-    ui.add_space(16.0);
-
     let mut close = false;
 
-    ui.horizontal(|ui| {
-        ui.add_space(10.0);
-        let back = ui.add(
-            egui::Label::new(
-                RichText::new("← Назад").color(Color32::from_white_alpha(90)).size(11.5)
-            ).sense(Sense::click())
-        );
-        if back.clicked() { close = true; }
-        ui.add_space(8.0);
-        ui.label(
-            RichText::new(&state.task_name)
-                .color(Color32::from_white_alpha(45))
-                .size(11.0)
-        );
-    });
+    let close_center = bar_rect.max - vec2(11.0, 2.0);
+    let close_r = ui.allocate_rect(
+        egui::Rect::from_center_size(close_center, vec2(14.0, 10.0)),
+        Sense::click(),
+    );
+    let close_col = if close_r.hovered() {
+        Color32::from_rgb(255, 80, 80)
+    } else {
+        Color32::from_rgb(220, 50, 50)
+    };
+    {
+        let c   = close_center;
+        let tip = c + vec2( 4.0,  0.0);
+        let top = c + vec2(-2.5, -3.8);
+        let bot = c + vec2(-2.5,  3.8);
+        ui.painter().add(Shape::convex_polygon(vec![tip, top, bot], close_col, Stroke::NONE));
+    }
+    if close_r.clicked() { close = true; }
 
-    ui.add_space(8.0);
-    let y = ui.next_widget_position().y;
-    ui.painter().hline(0.0..=RW, y, (0.5, crate::SEP));
-    ui.add_space(12.0);
+    let c = bar_rect.center();
+    for x in [-6.0f32, 0.0, 6.0] {
+        ui.painter().circle_filled(c + vec2(x, 4.0), 1.5, Color32::from_white_alpha(35));
+    }
 
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        ui.label(
-            RichText::new("Здесь будет редактор расписания")
-                .color(Color32::from_white_alpha(40))
-                .size(12.0),
+    {
+        let p = ui.painter();
+        p.circle_filled(bar_rect.min + vec2(10.0, 10.5), 2.0, Color32::from_rgb(220, 180, 40));
+
+        let max_chars = 28;
+        let title = if state.task_name.chars().count() > max_chars {
+            let truncated: String = state.task_name.chars().take(max_chars).collect();
+            format!("{}…", truncated.trim_end())
+        } else {
+            state.task_name.clone()
+        };
+
+        p.text(
+            bar_rect.min + vec2(17.0, 10.5),
+            Align2::LEFT_CENTER,
+            &title,
+            FontId::proportional(10.5),
+            Color32::from_white_alpha(180),
         );
-    });
+    }
 
     close
 }
