@@ -1,21 +1,42 @@
-use eframe::egui::{self, Align2, Color32, FontId, Sense, Shape, Stroke, ViewportCommand, vec2};
+use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Shape, Stroke, ViewportCommand, vec2};
 use crate::BG;
 
 pub const RW: f32 = 254.0;
-pub const RH: f32 = 320.0;
+
+pub const RH_DIRECT: f32 = 300.0;
+pub const RH_WEEK:   f32 = 300.0;
+pub const RH_MONTH:  f32 = 300.0;
+
+#[derive(PartialEq, Clone, Copy)]
+pub enum RoutineTab { Direct, Week, Month }
 
 pub struct RoutineUiState {
     pub task_id:   String,
     pub task_name: String,
+    pub tab:       RoutineTab,
 }
 
 impl Default for RoutineUiState {
     fn default() -> Self {
-        Self { task_id: String::new(), task_name: String::new() }
+        Self {
+            task_id:   String::new(),
+            task_name: String::new(),
+            tab:       RoutineTab::Direct,
+        }
     }
 }
 
-pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &RoutineUiState) -> bool {
+impl RoutineUiState {
+    pub fn target_height(&self) -> f32 {
+        match self.tab {
+            RoutineTab::Direct => RH_DIRECT,
+            RoutineTab::Week   => RH_WEEK,
+            RoutineTab::Month  => RH_MONTH,
+        }
+    }
+}
+
+pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) -> bool {
     ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
@@ -69,6 +90,39 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &RoutineUiState) -> b
             Color32::from_white_alpha(180),
         );
     }
+
+    ui.add_space(9.8);
+    let tabs = [
+        ("Дата",    RoutineTab::Direct),
+        ("Неделя", RoutineTab::Week),
+        ("Месяц", RoutineTab::Month),
+    ];
+    let font_id = egui::FontId::proportional(12.0);
+    let total_w: f32 = tabs.iter().map(|(label, _)|
+        ui.painter().layout_no_wrap(label.to_string(), font_id.clone(), Color32::WHITE).size().x
+    ).sum();
+    let gap = (RW - total_w) / (tabs.len() as f32 + 1.0);
+    ui.horizontal(|ui| {
+        ui.add_space(gap);
+        for (label, tab) in &tabs {
+            let active = state.tab == *tab;
+            let color = if active {
+                Color32::from_white_alpha(220)
+            } else {
+                Color32::from_white_alpha(90)
+            };
+            let resp = ui.add(
+                egui::Label::new(RichText::new(*label).color(color).size(12.0))
+                    .sense(Sense::click()),
+            );
+            if resp.clicked() { state.tab = tab.clone(); }
+            ui.add_space(gap);
+        }
+    });
+    ui.add_space(6.0);
+    let y = ui.next_widget_position().y;
+    ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
+    ui.add_space(1.0);
 
     close
 }

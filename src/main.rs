@@ -422,9 +422,9 @@ impl eframe::App for App {
         }
 
         if let Screen::Routine = self.screen {
-            let close = ui::routine::draw(&ctx, ui, &self.routine_ui);
+            let close = ui::routine::draw(&ctx, ui, &mut self.routine_ui);
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                vec2(ui::routine::RW, ui::routine::RH),
+                vec2(ui::routine::RW, self.routine_ui.target_height()),
             ));
             if close {
                 self.screen = Screen::Main;
@@ -966,7 +966,7 @@ impl eframe::App for App {
                 }
                 self.screen = Screen::Routine;
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                    vec2(ui::routine::RW, ui::routine::RH),
+                    vec2(ui::routine::RW, ui::routine::RW),
                 ));
             }
             if let Some(i) = delete {

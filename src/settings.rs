@@ -155,25 +155,31 @@ pub fn draw_settings_ui(
     // ── tab bar ───────────────────────────────────────────────────────────────
 
     ui.add_space(9.8);
+    let tabs = [
+        ("Основные",      SettingsTab::General),
+        ("Проекты",       SettingsTab::Projects),
+        ("Синхронизация", SettingsTab::Sync),
+    ];
+    let font_id = egui::FontId::proportional(12.0);
+    let total_w: f32 = tabs.iter().map(|(label, _)|
+        ui.painter().layout_no_wrap(label.to_string(), font_id.clone(), Color32::WHITE).size().x
+    ).sum();
+    let gap = (SW - total_w) / (tabs.len() as f32 + 1.0);
     ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        for (label, tab) in [
-            ("Основные",       SettingsTab::General),
-            ("Проекты",        SettingsTab::Projects),
-            ("Синхронизация",  SettingsTab::Sync),
-        ] {
-            let active = state.tab == tab;
+        ui.add_space(gap);
+        for (label, tab) in &tabs {
+            let active = state.tab == *tab;
             let color  = if active {
                 Color32::from_white_alpha(220)
             } else {
                 Color32::from_white_alpha(90)
             };
             let resp = ui.add(
-                egui::Label::new(RichText::new(label).color(color).size(12.0))
+                egui::Label::new(RichText::new(*label).color(color).size(12.0))
                     .sense(Sense::click()),
             );
-            if resp.clicked() { state.tab = tab; }
-            ui.add_space(12.0);
+            if resp.clicked() { state.tab = tab.clone(); }
+            ui.add_space(gap);
         }
     });
 
