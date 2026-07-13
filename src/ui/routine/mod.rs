@@ -1,3 +1,4 @@
+pub mod date_picker;
 pub mod tab_direct;
 
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Shape, Stroke, ViewportCommand, vec2};

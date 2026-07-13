@@ -1,7 +1,8 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea, TextEdit, vec2};
+use super::date_picker;
 
 pub struct DirectState {
-    pub date_buf:  String,
+    pub date:      date_picker::DatePickerState,
     pub time_buf:  String,
     pub entries:   Vec<String>,
 }
@@ -9,7 +10,7 @@ pub struct DirectState {
 impl Default for DirectState {
     fn default() -> Self {
         Self {
-            date_buf: String::new(),
+            date:     date_picker::DatePickerState::default(),
             time_buf: String::new(),
             entries:  Vec::new(),
         }
@@ -42,12 +43,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
 
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        ui.add(
-            TextEdit::singleline(&mut state.date_buf)
-                .hint_text("дд.мм.гггг")
-                .desired_width(88.0)
-                .font(egui::TextStyle::Small),
-        );
+        date_picker::show(ui, &mut state.date);
         ui.add_space(5.0);
         ui.add(
             TextEdit::singleline(&mut state.time_buf)
@@ -56,15 +52,16 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
                 .font(egui::TextStyle::Small),
         );
         ui.add_space(5.0);
-        let can_add = !state.date_buf.is_empty() && !state.time_buf.is_empty();
+        let can_add = state.date.selected.is_some() && !state.time_buf.is_empty();
         let btn = ui.add_enabled(
             can_add,
             egui::Button::new(RichText::new("+").color(Color32::from_white_alpha(180)).size(14.0))
                 .min_size(vec2(24.0, 0.0)),
         );
         if btn.clicked() {
-            state.entries.push(format_entry(&state.date_buf, &state.time_buf));
-            state.date_buf.clear();
+            let date_str = state.date.selected.clone().unwrap_or_default();
+            state.entries.push(format_entry(&date_str, &state.time_buf));
+            state.date.selected = None;
             state.time_buf.clear();
         }
     });
