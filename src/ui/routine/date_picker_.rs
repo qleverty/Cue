@@ -70,8 +70,6 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
                     .show(ui, |ui| {
                         ui.set_min_size(vec2(POPUP_W - 16.0, POPUP_H - 16.0));
                         draw_header(ui, state);
-                        ui.add_space(4.0);
-                        draw_dow_row(ui);
                     });
             });
 
@@ -94,24 +92,6 @@ fn cross_btn(ui: &mut egui::Ui) -> egui::Response {
         bytes: CROSS_PNG.into(),
     }).fit_to_exact_size(vec2(8.0, 8.0)).tint(tint));
     resp
-}
-
-
-fn draw_dow_row(ui: &mut egui::Ui) {
-    const DAYS: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-    let font_id = egui::FontId::proportional(10.5);
-    let inner_w = POPUP_W - 16.0;
-    let total_w: f32 = DAYS.iter().map(|d|
-        ui.painter().layout_no_wrap(d.to_string(), font_id.clone(), Color32::WHITE).size().x
-    ).sum();
-    let gap = (inner_w - total_w) / (DAYS.len() as f32 + 1.0);
-    ui.horizontal(|ui| {
-        ui.add_space(gap);
-        for day in &DAYS {
-            ui.label(RichText::new(*day).color(Color32::from_white_alpha(60)).size(10.5));
-            ui.add_space(gap);
-        }
-    });
 }
 
 fn draw_header(ui: &mut egui::Ui, state: &mut DatePickerState) {
