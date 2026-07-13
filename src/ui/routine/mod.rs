@@ -1,9 +1,11 @@
+pub mod tab_direct;
+
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Shape, Stroke, ViewportCommand, vec2};
 use crate::BG;
 
 pub const RW: f32 = 254.0;
 
-pub const RH_DIRECT: f32 = 300.0;
+pub const RH_DIRECT: f32 = 340.0;
 pub const RH_WEEK:   f32 = 300.0;
 pub const RH_MONTH:  f32 = 300.0;
 
@@ -14,6 +16,7 @@ pub struct RoutineUiState {
     pub task_id:   String,
     pub task_name: String,
     pub tab:       RoutineTab,
+    pub direct:    tab_direct::DirectState,
 }
 
 impl Default for RoutineUiState {
@@ -22,6 +25,7 @@ impl Default for RoutineUiState {
             task_id:   String::new(),
             task_name: String::new(),
             tab:       RoutineTab::Direct,
+            direct:    tab_direct::DirectState::default(),
         }
     }
 }
@@ -93,9 +97,9 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
 
     ui.add_space(9.8);
     let tabs = [
-        ("Дата",    RoutineTab::Direct),
-        ("Неделя", RoutineTab::Week),
-        ("Месяц", RoutineTab::Month),
+        ("Разово",  RoutineTab::Direct),
+        ("Неделя",  RoutineTab::Week),
+        ("Месяц",   RoutineTab::Month),
     ];
     let font_id = egui::FontId::proportional(12.0);
     let total_w: f32 = tabs.iter().map(|(label, _)|
@@ -123,6 +127,30 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     let y = ui.next_widget_position().y;
     ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
     ui.add_space(1.0);
+
+    match state.tab {
+        RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct),
+        RoutineTab::Week   => {}
+        RoutineTab::Month  => {}
+    }
+
+    let y = ui.next_widget_position().y;
+    ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
+
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        let save = ui.add(
+            egui::Button::new(
+                RichText::new("Сохранить")
+                    .color(Color32::from_white_alpha(180))
+                    .size(12.0),
+            )
+            .min_size(vec2(RW - 28.0, 22.0)),
+        );
+        if save.clicked() { close = true; }
+    });
+    ui.add_space(8.0);
 
     close
 }
