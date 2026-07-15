@@ -98,7 +98,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
 
     ui.add_space(9.8);
     let tabs = [
-        ("Разово",  RoutineTab::Direct),
+        ("Дата",  RoutineTab::Direct),
         ("Неделя",  RoutineTab::Week),
         ("Месяц",   RoutineTab::Month),
     ];

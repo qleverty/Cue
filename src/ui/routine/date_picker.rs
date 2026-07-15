@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, ImageSource, Order, RichText, Sense, vec2};
+use eframe::egui::{self, Align2, Color32, FontId, ImageSource, Order, RichText, Sense, vec2};
 
 pub const POPUP_W: f32 = 200.0;
 pub const POPUP_H: f32 = 190.0;
@@ -63,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
             .order(Order::Foreground)
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
-                    .fill(egui::Color32::from_rgba_premultiplied(14, 14, 18, 250))
+                    .fill(egui::Color32::from_rgba_premultiplied(0, 0, 0, 204))
                     .corner_radius(6.0)
                     .inner_margin(egui::Margin::same(8))
                     .stroke(egui::Stroke::new(0.5, Color32::from_white_alpha(18)))
@@ -81,8 +81,33 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
     }
 }
 
-fn cross_btn(ui: &mut egui::Ui) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(15.0, 15.0), Sense::click());
+
+
+fn draw_dow_row(ui: &mut egui::Ui) {
+    const DAYS: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+    let inner_w = POPUP_W - 16.0;
+    let cell_w  = inner_w / DAYS.len() as f32;
+    let row_h   = 14.0;
+    let (row, _) = ui.allocate_exact_size(vec2(inner_w, row_h), Sense::hover());
+
+    for (i, day) in DAYS.iter().enumerate() {
+        let center = egui::pos2(
+            row.min.x + cell_w * i as f32 + cell_w / 2.0,
+            row.center().y,
+        );
+        ui.painter().text(
+            center, Align2::CENTER_CENTER, day,
+            FontId::proportional(10.0),
+            Color32::from_white_alpha(55),
+        );
+    }
+}
+
+// Distance from popup center to each nav button center — tune this
+const BTN_OFFSET: f32 = 52.0;
+
+fn cross_at(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
+    let resp = ui.allocate_rect(rect, Sense::click());
     let tint = if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         Color32::WHITE
@@ -96,56 +121,36 @@ fn cross_btn(ui: &mut egui::Ui) -> egui::Response {
     resp
 }
 
-
-fn draw_dow_row(ui: &mut egui::Ui) {
-    const DAYS: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
-    let font_id = egui::FontId::proportional(10.5);
-    let inner_w = POPUP_W - 16.0;
-    let total_w: f32 = DAYS.iter().map(|d|
-        ui.painter().layout_no_wrap(d.to_string(), font_id.clone(), Color32::WHITE).size().x
-    ).sum();
-    let gap = (inner_w - total_w) / (DAYS.len() as f32 + 1.0);
-    ui.horizontal(|ui| {
-        ui.add_space(gap);
-        for day in &DAYS {
-            ui.label(RichText::new(*day).color(Color32::from_white_alpha(60)).size(10.5));
-            ui.add_space(gap);
-        }
-    });
-}
-
 fn draw_header(ui: &mut egui::Ui, state: &mut DatePickerState) {
-    let title = format!("{} {}", MONTHS[state.view_month], state.view_year);
-    let inner_w = POPUP_W - 16.0;
-
-    let font_id = egui::FontId::proportional(11.5);
-    let title_w = ui.painter()
-        .layout_no_wrap(title.clone(), font_id.clone(), Color32::WHITE)
-        .size().x;
-
+    let title    = format!("{} {}", MONTHS[state.view_month], state.view_year);
+    let inner_w  = POPUP_W - 16.0;
     let btn_w    = 15.0;
-    let gap      = (inner_w - title_w - btn_w * 2.0) / 4.0;
+    let row_h    = 15.0;
 
-    ui.horizontal(|ui| {
-        ui.add_space(gap);
-        if cross_btn(ui).clicked() {
-            if state.view_month == 0 {
-                state.view_month = 11;
-                state.view_year -= 1;
-            } else {
-                state.view_month -= 1;
-            }
-        }
-        ui.add_space(gap);
-        ui.label(RichText::new(&title).color(Color32::WHITE).size(11.5));
-        ui.add_space(gap);
-        if cross_btn(ui).clicked() {
-            if state.view_month == 11 {
-                state.view_month = 0;
-                state.view_year += 1;
-            } else {
-                state.view_month += 1;
-            }
-        }
-    });
+    let (row, _) = ui.allocate_exact_size(vec2(inner_w, row_h), Sense::hover());
+    let cx       = row.min.x + inner_w / 2.0;
+
+    let left_rect  = egui::Rect::from_center_size(
+        egui::pos2(cx - BTN_OFFSET, row.center().y), vec2(btn_w, btn_w),
+    );
+    let right_rect = egui::Rect::from_center_size(
+        egui::pos2(cx + BTN_OFFSET, row.center().y), vec2(btn_w, btn_w),
+    );
+
+    if cross_at(ui, left_rect).clicked() {
+        if state.view_month == 0 { state.view_month = 11; state.view_year -= 1; }
+        else { state.view_month -= 1; }
+    }
+    if cross_at(ui, right_rect).clicked() {
+        if state.view_month == 11 { state.view_month = 0; state.view_year += 1; }
+        else { state.view_month += 1; }
+    }
+
+    ui.painter().text(
+        row.center(),
+        Align2::CENTER_CENTER,
+        &title,
+        FontId::proportional(11.5),
+        Color32::WHITE,
+    );
 }

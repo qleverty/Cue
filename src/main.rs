@@ -38,7 +38,7 @@ use std::mem;
 pub const W:     f32   = 254.0;
 pub const MIN_W: f32   = 180.0;
 pub const ROW:   f32   = 28.0;
-pub const BG:  Color32 = Color32::from_rgba_premultiplied(9, 9, 11, 222);
+pub const BG:  Color32 = Color32::from_rgba_premultiplied(9, 9, 9, 222);
 pub const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
 static TICK_PNG:  &[u8] = include_bytes!("../pics/tick.png");
