@@ -2,9 +2,9 @@ use eframe::egui::{self, Align2, Color32, FontId, ImageSource, Order, RichText, 
 
 pub const POPUP_W: f32 = 200.0;
 
-static ARROW_PNG: &[u8] = include_bytes!("../../../pics/arrow.png");
+static CROSS_PNG: &[u8] = include_bytes!("../../../pics/cross.png");
 
-const MONTHS_LONG: [&str; 12] = [
+const MONTHS_LONG:  [&str; 12] = [
     "Январь", "Февраль", "Март",      "Апрель",
     "Май",    "Июнь",    "Июль",      "Август",
     "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
@@ -15,10 +15,10 @@ pub const MONTHS_SHORT: [&str; 12] = [
 ];
 const DOW: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 
-const INNER_W:    f32 = POPUP_W - 16.0;
-const CELL_W:     f32 = INNER_W / 7.0;
-const CELL_H:     f32 = 20.0;
-const BTN_OFFSET: f32 = 49.0;
+const INNER_W:    f32  = POPUP_W - 16.0;
+const CELL_W:     f32  = INNER_W / 7.0;
+const CELL_H:     f32  = 20.0;
+const BTN_OFFSET: f32  = 52.0;
 
 pub struct DatePickerState {
     pub open:       bool,
@@ -29,32 +29,8 @@ pub struct DatePickerState {
 
 impl Default for DatePickerState {
     fn default() -> Self {
-        let (_, m, y) = today();
-        Self { open: false, selected: None, view_year: y, view_month: m }
+        Self { open: false, selected: None, view_year: 2025, view_month: 5 }
     }
-}
-
-fn today() -> (u32, usize, i32) {
-    let days = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() / 86400;
-    let (y, m, d) = civil_from_days(days as i64);
-    (d, (m - 1) as usize, y)
-}
-
-fn civil_from_days(z: i64) -> (i32, i64, u32) {
-    let z = z + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
-    let y   = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp  = (5 * doy + 2) / 153;
-    let d   = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m   = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y   = if m <= 2 { y + 1 } else { y };
-    (y as i32, m, d)
 }
 
 fn days_in_month(month: usize, year: i32) -> u32 {
@@ -66,7 +42,8 @@ fn days_in_month(month: usize, year: i32) -> u32 {
 fn first_weekday(month: usize, year: i32) -> usize {
     let t = [0i32, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let y = if month < 2 { year - 1 } else { year };
-    ((y + y/4 - y/100 + y/400 + t[month] + 1 + 6).rem_euclid(7)) as usize
+    let dow = (y + y/4 - y/100 + y/400 + t[month] + 1).rem_euclid(7);
+    ((dow + 6).rem_euclid(7)) as usize
 }
 
 pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
@@ -85,15 +62,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
             .min_size(vec2(110.0, 22.0))
             .sense(Sense::click()),
     );
-
-    if btn.clicked() {
-        state.open = !state.open;
-        if state.open {
-            let (_, m, y) = state.selected.unwrap_or_else(today);
-            state.view_month = m;
-            state.view_year  = y;
-        }
-    }
+    if btn.clicked() { state.open = !state.open; }
 
     if !state.open { return; }
 
@@ -109,76 +78,46 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
                 .inner_margin(egui::Margin::same(8))
                 .stroke(egui::Stroke::new(0.5, Color32::from_white_alpha(18)))
                 .show(ui, |ui| {
-                    let (td, tm, ty) = today();
-                    draw_header(ui, state, tm, ty);
+                    draw_header(ui, state);
                     ui.add_space(4.0);
                     draw_dow_row(ui);
                     ui.add_space(2.0);
-                    draw_grid(ui, state, td, tm, ty);
+                    draw_grid(ui, state);
                 });
         });
 
     if area.response.clicked_elsewhere() { state.open = false; }
 }
 
-fn arrow_btn(ui: &mut egui::Ui, rect: egui::Rect, flipped: bool) -> egui::Response {
-    let id   = ui.id().with(rect.min.x.to_bits()).with(rect.min.y.to_bits());
-    let resp = ui.interact(rect, id, Sense::click());
+fn cross_at(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
+    let resp = ui.allocate_rect(rect, Sense::click());
     let tint = if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         Color32::WHITE
     } else {
         Color32::from_gray(130)
     };
-    egui::Image::new(ImageSource::Bytes {
-        uri:   "bytes://arrow.png".into(),
-        bytes: ARROW_PNG.into(),
-    })
-    .fit_to_exact_size(vec2(1.0, 1.0))
-    .tint(tint)
-	.uv(if flipped {
-		egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
-	} else {
-		egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
-	})
-    .paint_at(ui, rect);
+    ui.put(rect, egui::Image::new(ImageSource::Bytes {
+        uri:   "bytes://cross.png".into(),
+        bytes: CROSS_PNG.into(),
+    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(tint));
     resp
 }
 
-fn draw_arrow_static(ui: &mut egui::Ui, rect: egui::Rect, flipped: bool, tint: Color32) {
-    let uv = if flipped {
-        egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
-    } else {
-        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
-    };
-    egui::Image::new(ImageSource::Bytes {
-        uri:   "bytes://arrow.png".into(),
-        bytes: ARROW_PNG.into(),
-    })
-    .fit_to_exact_size(vec2(1.0, 1.0))
-    .tint(tint)
-    .uv(uv)
-    .paint_at(ui, rect);
-}
-
-fn draw_header(ui: &mut egui::Ui, state: &mut DatePickerState, today_m: usize, today_y: i32) {
-    let title      = format!("{} {}", MONTHS_LONG[state.view_month], state.view_year);
-    let at_minimum = state.view_year == today_y && state.view_month == today_m;
-    let btn_w      = 14.0;
-    let (row, _)   = ui.allocate_exact_size(vec2(INNER_W, 15.0), Sense::hover());
-    let cx         = row.min.x + INNER_W / 2.0;
+fn draw_header(ui: &mut egui::Ui, state: &mut DatePickerState) {
+    let title    = format!("{} {}", MONTHS_LONG[state.view_month], state.view_year);
+    let btn_w    = 15.0;
+    let (row, _) = ui.allocate_exact_size(vec2(INNER_W, 15.0), Sense::hover());
+    let cx       = row.min.x + INNER_W / 2.0;
 
     let left  = egui::Rect::from_center_size(egui::pos2(cx - BTN_OFFSET, row.center().y), vec2(btn_w, btn_w));
     let right = egui::Rect::from_center_size(egui::pos2(cx + BTN_OFFSET, row.center().y), vec2(btn_w, btn_w));
 
-	if at_minimum {
-		draw_arrow_static(ui, left, true, Color32::from_gray(80));
-	} else if arrow_btn(ui, left, true).clicked() {
-		if state.view_month == 0 { state.view_month = 11; state.view_year -= 1; }
-		else { state.view_month -= 1; }
-	}
-
-    if arrow_btn(ui, right, false).clicked() {
+    if cross_at(ui, left).clicked() {
+        if state.view_month == 0 { state.view_month = 11; state.view_year -= 1; }
+        else { state.view_month -= 1; }
+    }
+    if cross_at(ui, right).clicked() {
         if state.view_month == 11 { state.view_month = 0; state.view_year += 1; }
         else { state.view_month += 1; }
     }
@@ -198,7 +137,7 @@ fn draw_dow_row(ui: &mut egui::Ui) {
     }
 }
 
-fn draw_grid(ui: &mut egui::Ui, state: &mut DatePickerState, today_d: u32, today_m: usize, today_y: i32) {
+fn draw_grid(ui: &mut egui::Ui, state: &mut DatePickerState) {
     let offset     = first_weekday(state.view_month, state.view_year);
     let total_days = days_in_month(state.view_month, state.view_year);
     let (grid, _)  = ui.allocate_exact_size(vec2(INNER_W, 6.0 * CELL_H), Sense::hover());
@@ -208,8 +147,6 @@ fn draw_grid(ui: &mut egui::Ui, state: &mut DatePickerState, today_d: u32, today
         let day = (i - offset + 1) as u32;
         if day > total_days { continue; }
 
-        let is_past = state.view_year == today_y && state.view_month == today_m && day < today_d;
-
         let col  = (i % 7) as f32;
         let row  = (i / 7) as f32;
         let cell = egui::Rect::from_min_size(
@@ -217,25 +154,16 @@ fn draw_grid(ui: &mut egui::Ui, state: &mut DatePickerState, today_d: u32, today
             vec2(CELL_W, CELL_H),
         );
 
-        if is_past {
-            ui.allocate_rect(cell, Sense::hover());
-            ui.painter().text(cell.center(), Align2::CENTER_CENTER, day.to_string(),
-                FontId::proportional(11.0), Color32::from_white_alpha(80));
-            continue;
-        }
-
         let is_selected = state.selected == Some((day, state.view_month, state.view_year));
-        let is_today    = day == today_d && state.view_month == today_m && state.view_year == today_y;
         let resp        = ui.allocate_rect(cell, Sense::click());
 
         let text_col = if is_selected {
+            ui.painter().rect_filled(cell.shrink(2.0), 3.0, Color32::from_white_alpha(40));
             Color32::WHITE
         } else if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
             ui.painter().rect_filled(cell.shrink(2.0), 3.0, Color32::from_white_alpha(12));
             Color32::from_white_alpha(220)
-        } else if is_today {
-            Color32::from_rgb(220, 180, 40)
         } else {
             Color32::from_white_alpha(160)
         };

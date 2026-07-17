@@ -2,7 +2,7 @@ use eframe::egui::{self, Align2, Color32, FontId, ImageSource, Order, RichText, 
 
 pub const POPUP_W: f32 = 200.0;
 
-static ARROW_PNG: &[u8] = include_bytes!("../../../pics/arrow.png");
+static CROSS_PNG: &[u8] = include_bytes!("../../../pics/cross.png");
 
 const MONTHS_LONG: [&str; 12] = [
     "Январь", "Февраль", "Март",      "Апрель",
@@ -18,7 +18,7 @@ const DOW: [&str; 7] = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
 const INNER_W:    f32 = POPUP_W - 16.0;
 const CELL_W:     f32 = INNER_W / 7.0;
 const CELL_H:     f32 = 20.0;
-const BTN_OFFSET: f32 = 49.0;
+const BTN_OFFSET: f32 = 52.0;
 
 pub struct DatePickerState {
     pub open:       bool,
@@ -121,64 +121,42 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
     if area.response.clicked_elsewhere() { state.open = false; }
 }
 
-fn arrow_btn(ui: &mut egui::Ui, rect: egui::Rect, flipped: bool) -> egui::Response {
-    let id   = ui.id().with(rect.min.x.to_bits()).with(rect.min.y.to_bits());
-    let resp = ui.interact(rect, id, Sense::click());
+fn cross_at(ui: &mut egui::Ui, rect: egui::Rect) -> egui::Response {
+    let resp = ui.allocate_rect(rect, Sense::click());
     let tint = if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
         Color32::WHITE
     } else {
         Color32::from_gray(130)
     };
-    egui::Image::new(ImageSource::Bytes {
-        uri:   "bytes://arrow.png".into(),
-        bytes: ARROW_PNG.into(),
-    })
-    .fit_to_exact_size(vec2(1.0, 1.0))
-    .tint(tint)
-	.uv(if flipped {
-		egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
-	} else {
-		egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
-	})
-    .paint_at(ui, rect);
+    ui.put(rect, egui::Image::new(ImageSource::Bytes {
+        uri:   "bytes://cross.png".into(),
+        bytes: CROSS_PNG.into(),
+    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(tint));
     resp
-}
-
-fn draw_arrow_static(ui: &mut egui::Ui, rect: egui::Rect, flipped: bool, tint: Color32) {
-    let uv = if flipped {
-        egui::Rect::from_min_max(egui::pos2(1.0, 0.0), egui::pos2(0.0, 1.0))
-    } else {
-        egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
-    };
-    egui::Image::new(ImageSource::Bytes {
-        uri:   "bytes://arrow.png".into(),
-        bytes: ARROW_PNG.into(),
-    })
-    .fit_to_exact_size(vec2(1.0, 1.0))
-    .tint(tint)
-    .uv(uv)
-    .paint_at(ui, rect);
 }
 
 fn draw_header(ui: &mut egui::Ui, state: &mut DatePickerState, today_m: usize, today_y: i32) {
     let title      = format!("{} {}", MONTHS_LONG[state.view_month], state.view_year);
     let at_minimum = state.view_year == today_y && state.view_month == today_m;
-    let btn_w      = 14.0;
+    let btn_w      = 15.0;
     let (row, _)   = ui.allocate_exact_size(vec2(INNER_W, 15.0), Sense::hover());
     let cx         = row.min.x + INNER_W / 2.0;
 
     let left  = egui::Rect::from_center_size(egui::pos2(cx - BTN_OFFSET, row.center().y), vec2(btn_w, btn_w));
     let right = egui::Rect::from_center_size(egui::pos2(cx + BTN_OFFSET, row.center().y), vec2(btn_w, btn_w));
 
-	if at_minimum {
-		draw_arrow_static(ui, left, true, Color32::from_gray(80));
-	} else if arrow_btn(ui, left, true).clicked() {
-		if state.view_month == 0 { state.view_month = 11; state.view_year -= 1; }
-		else { state.view_month -= 1; }
-	}
+    if at_minimum {
+        ui.painter().text(
+            left.center(), Align2::CENTER_CENTER, "×",
+            FontId::proportional(10.0), Color32::from_white_alpha(18),
+        );
+    } else if cross_at(ui, left).clicked() {
+        if state.view_month == 0 { state.view_month = 11; state.view_year -= 1; }
+        else { state.view_month -= 1; }
+    }
 
-    if arrow_btn(ui, right, false).clicked() {
+    if cross_at(ui, right).clicked() {
         if state.view_month == 11 { state.view_month = 0; state.view_year += 1; }
         else { state.view_month += 1; }
     }
@@ -220,7 +198,7 @@ fn draw_grid(ui: &mut egui::Ui, state: &mut DatePickerState, today_d: u32, today
         if is_past {
             ui.allocate_rect(cell, Sense::hover());
             ui.painter().text(cell.center(), Align2::CENTER_CENTER, day.to_string(),
-                FontId::proportional(11.0), Color32::from_white_alpha(80));
+                FontId::proportional(11.0), Color32::from_white_alpha(90));
             continue;
         }
 

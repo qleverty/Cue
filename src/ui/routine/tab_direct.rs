@@ -17,25 +17,8 @@ impl Default for DirectState {
     }
 }
 
-const MONTHS: [&str; 12] = [
-    "янв", "фев", "мар", "апр", "май", "июн",
-    "июл", "авг", "сен", "окт", "ноя", "дек",
-];
-
-fn format_entry(date: &str, time: &str) -> String {
-    let parts: Vec<&str> = date.splitn(3, '.').collect();
-    if parts.len() == 3 {
-        if let (Ok(d), Ok(m), Ok(y)) = (
-            parts[0].parse::<u32>(),
-            parts[1].parse::<usize>(),
-            parts[2].parse::<u32>(),
-        ) {
-            if m >= 1 && m <= 12 {
-                return format!("{} {} {} · {}", d, MONTHS[m - 1], y, time);
-            }
-        }
-    }
-    format!("{} · {}", date, time)
+fn format_entry(day: u32, month: usize, year: i32, time: &str) -> String {
+    format!("{} {} {} · {}", day, date_picker::MONTHS_SHORT[month], year, time)
 }
 
 pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
@@ -59,10 +42,11 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
                 .min_size(vec2(24.0, 0.0)),
         );
         if btn.clicked() {
-            let date_str = state.date.selected.clone().unwrap_or_default();
-            state.entries.push(format_entry(&date_str, &state.time_buf));
-            state.date.selected = None;
-            state.time_buf.clear();
+            if let Some((d, m, y)) = state.date.selected {
+                state.entries.push(format_entry(d, m, y, &state.time_buf));
+                state.date.selected = None;
+                state.time_buf.clear();
+            }
         }
     });
 
