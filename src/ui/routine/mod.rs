@@ -1,6 +1,7 @@
 pub mod date_picker;
 pub mod tab_direct;
 pub mod tab_week;
+pub mod tab_month;
 
 use eframe::egui::{self, Align2, Color32, FontId, RichText, Sense, Shape, Stroke, ViewportCommand, vec2};
 use crate::BG;
@@ -20,6 +21,7 @@ pub struct RoutineUiState {
     pub tab:       RoutineTab,
     pub direct:    tab_direct::DirectState,
     pub week:      tab_week::WeekState,
+    pub month:     tab_month::MonthState,
 }
 
 impl Default for RoutineUiState {
@@ -30,6 +32,7 @@ impl Default for RoutineUiState {
             tab:       RoutineTab::Direct,
             direct:    tab_direct::DirectState::default(),
             week:      tab_week::WeekState::default(),
+			month:     tab_month::MonthState::default(),
         }
     }
 }
@@ -135,7 +138,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     match state.tab {
         RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct),
         RoutineTab::Week   => tab_week::draw(ui, &mut state.week),
-        RoutineTab::Month  => {}
+        RoutineTab::Month  => tab_month::draw(ui, &mut state.month),
     }
 
     let y = ui.next_widget_position().y;
