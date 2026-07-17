@@ -1,4 +1,4 @@
-use eframe::egui::{self, Align2, Color32, FontId, RichText, ScrollArea, Sense, TextEdit, vec2};
+use eframe::egui::{self, Color32, RichText, ScrollArea, Sense, TextEdit, vec2};
 
 pub struct MonthState {
     pub selected_days: [bool; 31],
@@ -19,56 +19,33 @@ impl Default for MonthState {
 pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
     ui.add_space(10.0);
 
-    let cols      = 7_usize;
-    let rows      = 5_usize;
-    let gap       = 3.0_f32;
-    let inner_w   = super::RW - 28.0;
-    let cell_w    = (inner_w - gap * (cols as f32 - 1.0)) / cols as f32;
-    let cell_h    = cell_w * 0.85;
-    let grid_h    = rows as f32 * cell_h + (rows as f32 - 1.0) * gap;
+    let gap   = 4.0_f32;
+    let btn_h = 18.0_f32;
+    let rows: [(usize, usize); 3] = [(0, 11), (11, 21), (21, 31)];
 
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        let (grid, _) = ui.allocate_exact_size(vec2(inner_w, grid_h), Sense::hover());
-
-        for day in 1u32..=31 {
-            let i    = (day - 1) as usize;
-            let col  = (i % cols) as f32;
-            let row  = (i / cols) as f32;
-            let cell = egui::Rect::from_min_size(
-                egui::pos2(
-                    grid.min.x + col * (cell_w + gap),
-                    grid.min.y + row * (cell_h + gap),
-                ),
-                vec2(cell_w, cell_h),
-            );
-
-            let selected = state.selected_days[i];
-            let id       = ui.id().with(day);
-            let resp     = ui.interact(cell, id, Sense::click());
-
-            let (bg, text_col) = if selected {
-                (Color32::from_white_alpha(35), Color32::WHITE)
-            } else if resp.hovered() {
-                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                (Color32::from_white_alpha(15), Color32::from_white_alpha(200))
-            } else {
-                (Color32::from_white_alpha(8), Color32::from_white_alpha(140))
-            };
-
-            ui.painter().rect_filled(cell, 3.0, bg);
-            ui.painter().text(
-                cell.center(), Align2::CENTER_CENTER,
-                day.to_string(),
-                FontId::proportional(10.5),
-                text_col,
-            );
-
-            if resp.clicked() {
-                state.selected_days[i] = !state.selected_days[i];
+    for (ri, &(start, end)) in rows.iter().enumerate() {
+        let count = end - start;
+        let btn_w = (super::RW - 28.0 - gap * (count as f32 - 1.0)) / count as f32;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            ui.add_space(14.0);
+            for i in start..end {
+                let day      = (i + 1) as u32;
+                let selected = state.selected_days[i];
+                let btn = ui.add(
+                    egui::Button::new(
+                        RichText::new(day.to_string())
+                            .color(if selected { Color32::WHITE } else { Color32::from_white_alpha(120) })
+                            .size(10.1),
+                    )
+                    .min_size(vec2(btn_w, btn_h))
+                    .fill(if selected { Color32::from_white_alpha(35) } else { Color32::from_white_alpha(8) }),
+                );
+                if btn.clicked() { state.selected_days[i] = !state.selected_days[i]; }
             }
-        }
-    });
+        });
+        if ri < 2 { ui.add_space(gap); }
+    }
 
     ui.add_space(6.0);
 
@@ -92,9 +69,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
         );
         if btn.clicked() {
             for (i, &sel) in state.selected_days.iter().enumerate() {
-                if sel {
-                    state.entries.push(((i + 1) as u32, state.time_buf.clone()));
-                }
+                if sel { state.entries.push(((i + 1) as u32, state.time_buf.clone())); }
             }
             state.entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
             state.selected_days = [false; 31];
@@ -107,43 +82,25 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
     if state.entries.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.label(
-                RichText::new("Нет дат")
-                    .color(Color32::from_white_alpha(30))
-                    .size(11.5),
-            );
+            ui.label(RichText::new("Нет дат").color(Color32::from_white_alpha(30)).size(11.5));
         });
     } else {
-        let entry_h     = 20.0;
-        let max_visible = 5;
-        let scroll_h    = (state.entries.len().min(max_visible) as f32) * entry_h;
-
+        let scroll_h = (state.entries.len().min(5) as f32) * 20.0;
         ScrollArea::vertical().max_height(scroll_h).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let mut remove = None;
             for (i, (day, time)) in state.entries.iter().enumerate() {
-                let label = format!("{} числа · {}", day, time);
                 ui.horizontal(|ui| {
                     ui.add_space(14.0);
-                    ui.label(
-                        RichText::new(&label)
-                            .color(Color32::from_white_alpha(160))
-                            .size(11.5),
-                    );
+                    ui.label(RichText::new(format!("{} числа · {}", day, time))
+                        .color(Color32::from_white_alpha(160)).size(11.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(14.0);
-                        let x = ui.add(
-                            egui::Label::new(
-                                RichText::new("×")
-                                    .color(Color32::from_white_alpha(60))
-                                    .size(13.0),
-                            )
-                            .sense(egui::Sense::click()),
-                        );
+                        let x = ui.add(egui::Label::new(
+                            RichText::new("×").color(Color32::from_white_alpha(60)).size(13.0)
+                        ).sense(Sense::click()));
                         if x.clicked() { remove = Some(i); }
-                        if x.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        }
+                        if x.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                     });
                 });
                 ui.add_space(2.0);
