@@ -1,4 +1,5 @@
 pub mod date_picker;
+pub mod time_input;
 pub mod tab_direct;
 pub mod tab_week;
 pub mod tab_month;

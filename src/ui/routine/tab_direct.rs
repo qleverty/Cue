@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, RichText, ScrollArea, TextEdit, vec2};
+use eframe::egui::{self, Color32, RichText, ScrollArea, vec2};
 use super::date_picker;
 
 pub struct DirectState {
@@ -28,12 +28,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
         ui.add_space(14.0);
         date_picker::show(ui, &mut state.date);
         ui.add_space(5.0);
-        ui.add(
-            TextEdit::singleline(&mut state.time_buf)
-                .hint_text("чч:мм")
-                .desired_width(46.0)
-                .font(egui::TextStyle::Small),
-        );
+super::time_input::time_input(ui, &mut state.time_buf);
         ui.add_space(5.0);
         let can_add = state.date.selected.is_some() && !state.time_buf.is_empty();
         let btn = ui.add_enabled(
