@@ -1,10 +1,27 @@
 use eframe::egui::{self, Color32, RichText, ScrollArea, vec2};
 use super::date_picker;
 
+pub struct DirectEntry {
+    pub day:   u32,
+    pub month: usize,
+    pub year:  i32,
+    pub time:  String,
+}
+
+impl DirectEntry {
+    pub fn display(&self) -> String {
+        format!("{} {} {} · {}", self.day, date_picker::MONTHS_SHORT[self.month], self.year, self.time)
+    }
+
+    pub fn to_routine_string(&self) -> String {
+        format!("{:04}-{:02}-{:02} {}", self.year, self.month + 1, self.day, self.time)
+    }
+}
+
 pub struct DirectState {
-    pub date:      date_picker::DatePickerState,
-    pub time_buf:  String,
-    pub entries:   Vec<String>,
+    pub date:     date_picker::DatePickerState,
+    pub time_buf: String,
+    pub entries:  Vec<DirectEntry>,
 }
 
 impl Default for DirectState {
@@ -15,10 +32,6 @@ impl Default for DirectState {
             entries:  Vec::new(),
         }
     }
-}
-
-fn format_entry(day: u32, month: usize, year: i32, time: &str) -> String {
-    format!("{} {} {} · {}", day, date_picker::MONTHS_SHORT[month], year, time)
 }
 
 pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
@@ -38,7 +51,8 @@ super::time_input::time_input(ui, &mut state.time_buf);
         );
         if btn.clicked() {
             if let Some((d, m, y)) = state.date.selected {
-                state.entries.push(format_entry(d, m, y, &state.time_buf));
+                state.entries.push(DirectEntry { day: d, month: m, year: y, time: state.time_buf.clone() });
+                state.entries.sort_by(|a, b| (a.year, a.month, a.day, &a.time).cmp(&(b.year, b.month, b.day, &b.time)));
                 state.date.selected = None;
                 state.time_buf.clear();
             }
@@ -72,7 +86,7 @@ super::time_input::time_input(ui, &mut state.time_buf);
                     ui.horizontal(|ui| {
                         ui.add_space(14.0);
                         ui.label(
-                            RichText::new(entry)
+                            RichText::new(entry.display())
                                 .color(Color32::from_white_alpha(160))
                                 .size(11.5),
                         );
