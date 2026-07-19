@@ -19,17 +19,17 @@ impl DirectEntry {
 }
 
 pub struct DirectState {
-    pub date:     date_picker::DatePickerState,
-    pub time_buf: String,
-    pub entries:  Vec<DirectEntry>,
+    pub date:       date_picker::DatePickerState,
+    pub time_input: super::time_input::TimeInputState,
+    pub entries:    Vec<DirectEntry>,
 }
 
 impl Default for DirectState {
     fn default() -> Self {
         Self {
-            date:     date_picker::DatePickerState::default(),
-            time_buf: String::new(),
-            entries:  Vec::new(),
+            date:       date_picker::DatePickerState::default(),
+            time_input: super::time_input::TimeInputState::default(),
+            entries:    Vec::new(),
         }
     }
 }
@@ -41,20 +41,20 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
         ui.add_space(14.0);
         date_picker::show(ui, &mut state.date);
         ui.add_space(5.0);
-super::time_input::time_input(ui, &mut state.time_buf);
+        super::time_input::time_input(ui, &mut state.time_input);
         ui.add_space(5.0);
-        let can_add = state.date.selected.is_some() && !state.time_buf.is_empty();
+        let can_add = state.date.selected.is_some() && state.time_input.is_valid();
         let btn = ui.add_enabled(
             can_add,
             egui::Button::new(RichText::new("+").color(Color32::from_white_alpha(180)).size(14.0))
                 .min_size(vec2(24.0, 0.0)),
         );
         if btn.clicked() {
-            if let Some((d, m, y)) = state.date.selected {
-                state.entries.push(DirectEntry { day: d, month: m, year: y, time: state.time_buf.clone() });
+            if let (Some((d, m, y)), Some(time)) = (state.date.selected, state.time_input.to_time_string()) {
+                state.entries.push(DirectEntry { day: d, month: m, year: y, time });
                 state.entries.sort_by(|a, b| (a.year, a.month, a.day, &a.time).cmp(&(b.year, b.month, b.day, &b.time)));
                 state.date.selected = None;
-                state.time_buf.clear();
+                state.time_input.clear();
             }
         }
     });

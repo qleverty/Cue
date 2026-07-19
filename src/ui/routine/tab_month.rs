@@ -1,8 +1,8 @@
-use eframe::egui::{self, Color32, RichText, ScrollArea, Sense, TextEdit, vec2};
+use eframe::egui::{self, Color32, RichText, ScrollArea, Sense, vec2};
 
 pub struct MonthState {
     pub selected_days: [bool; 31],
-    pub time_buf:      String,
+    pub time_input:    super::time_input::TimeInputState,
     pub entries:       Vec<(u32, String)>,
 }
 
@@ -10,7 +10,7 @@ impl Default for MonthState {
     fn default() -> Self {
         Self {
             selected_days: [false; 31],
-            time_buf:      String::new(),
+            time_input:    super::time_input::TimeInputState::default(),
             entries:       Vec::new(),
         }
     }
@@ -51,15 +51,10 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
 
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        ui.add(
-            TextEdit::singleline(&mut state.time_buf)
-                .hint_text("чч:мм")
-                .desired_width(46.0)
-                .font(egui::TextStyle::Small),
-        );
+        super::time_input::time_input(ui, &mut state.time_input);
         ui.add_space(5.0);
         let any_selected = state.selected_days.iter().any(|&d| d);
-        let can_add      = any_selected && !state.time_buf.is_empty();
+        let can_add      = any_selected && state.time_input.is_valid();
         let btn = ui.add_enabled(
             can_add,
             egui::Button::new(
@@ -68,12 +63,14 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
             .min_size(vec2(24.0, 0.0)),
         );
         if btn.clicked() {
-            for (i, &sel) in state.selected_days.iter().enumerate() {
-                if sel { state.entries.push(((i + 1) as u32, state.time_buf.clone())); }
+            if let Some(time) = state.time_input.to_time_string() {
+                for (i, &sel) in state.selected_days.iter().enumerate() {
+                    if sel { state.entries.push(((i + 1) as u32, time.clone())); }
+                }
+                state.entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+                state.selected_days = [false; 31];
+                state.time_input.clear();
             }
-            state.entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-            state.selected_days = [false; 31];
-            state.time_buf.clear();
         }
     });
 
