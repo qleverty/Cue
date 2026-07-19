@@ -38,7 +38,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut WeekState) {
                         .color(if selected {
                             Color32::WHITE
                         } else {
-                            Color32::from_white_alpha(130)
+                            Color32::from_white_alpha(120)
                         })
                         .size(11.0),
                 )
@@ -46,7 +46,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut WeekState) {
                 .fill(if selected {
                     Color32::from_white_alpha(35)
                 } else {
-                    Color32::from_white_alpha(11)
+                    Color32::from_white_alpha(8)
                 }),
             );
             if btn.clicked() {

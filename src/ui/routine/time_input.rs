@@ -111,7 +111,7 @@ pub fn time_input(ui: &mut egui::Ui, state: &mut TimeInputState) {
     }
 
     let painter  = ui.painter();
-    let bg       = if state.focused { Color32::from_white_alpha(18) } else { Color32::from_white_alpha(10) };
+    let bg       = if state.focused { Color32::from_white_alpha(22) } else { Color32::from_white_alpha(17) };
     painter.rect_filled(rect, 3.0, bg);
     if state.focused {
         painter.rect_stroke(rect, 3.0, Stroke::new(0.8, Color32::from_white_alpha(70)), egui::StrokeKind::Inside);
@@ -132,7 +132,7 @@ pub fn time_input(ui: &mut egui::Ui, state: &mut TimeInputState) {
 
     for (i, &x) in xs.iter().enumerate() {
         let (ch, color) = match state.digits[i] {
-            Some(d) => ((b'0' + d) as char, Color32::from_white_alpha(210)),
+            Some(d) => ((b'0' + d) as char, Color32::from_white_alpha(200)),
             None    => (ph_chars[i],         Color32::from_white_alpha(35)),
         };
         painter.text(Pos2::new(x, cy), egui::Align2::LEFT_CENTER, ch.to_string(), font.clone(), color);

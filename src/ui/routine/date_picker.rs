@@ -81,7 +81,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
     };
 
     let btn = ui.add(
-        egui::Button::new(RichText::new(&label).color(color).size(11.5))
+        egui::Button::new(RichText::new(&label).color(color).size(11.5)).fill(Color32::from_white_alpha(17))
             .min_size(vec2(110.0, 22.0))
             .sense(Sense::click()),
     );
