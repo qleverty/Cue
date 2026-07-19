@@ -38,7 +38,7 @@ impl TimeInputState {
 
 pub fn time_input(ui: &mut egui::Ui, state: &mut TimeInputState) {
     let w = 46.0_f32;
-    let h = 22.0_f32;
+    let h = 20.0_f32;
     let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::click());
 
     let cw  = 7.0_f32;
@@ -71,19 +71,7 @@ pub fn time_input(ui: &mut egui::Ui, state: &mut TimeInputState) {
             }
         }
     }
-    if ui.input(|i| !i.focused) { state.focused = false; }
     if ui.input(|i| i.pointer.any_click()) && !resp.clicked() { state.focused = false; }
-
-    if let Some(pos) = ui.input(|i| i.pointer.hover_pos()) {
-        if rect.contains(pos) {
-            let icon = if state.focused {
-                egui::CursorIcon::Text
-            } else {
-                egui::CursorIcon::PointingHand
-            };
-            ui.ctx().set_cursor_icon(icon);
-        }
-    }
 
     if state.focused {
         ui.ctx().request_repaint();
@@ -134,8 +122,6 @@ pub fn time_input(ui: &mut egui::Ui, state: &mut TimeInputState) {
     painter.rect_filled(rect, 3.0, bg);
     if state.focused {
         painter.rect_stroke(rect, 3.0, Stroke::new(0.8, Color32::from_white_alpha(70)), egui::StrokeKind::Inside);
-    } else if resp.hovered() {
-        painter.rect_stroke(rect, 3.0, Stroke::new(0.8, Color32::from_white_alpha(150)), egui::StrokeKind::Inside);
     }
 
     let font     = FontId::monospace(11.0);
@@ -148,13 +134,13 @@ pub fn time_input(ui: &mut egui::Ui, state: &mut TimeInputState) {
         egui::Align2::LEFT_CENTER,
         ":",
         font.clone(),
-        Color32::from_white_alpha(120),
+        Color32::from_white_alpha(100),
     );
 
     for (i, &x) in xs.iter().enumerate() {
         let (ch, color) = match state.digits[i] {
             Some(d) => ((b'0' + d) as char, Color32::from_white_alpha(200)),
-            None    => (ph_chars[i],         Color32::from_white_alpha(80)),
+            None    => (ph_chars[i],         Color32::from_white_alpha(35)),
         };
         painter.text(Pos2::new(x, cy), egui::Align2::LEFT_CENTER, ch.to_string(), font.clone(), color);
 
