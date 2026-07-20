@@ -85,6 +85,8 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
             .min_size(vec2(110.0, 22.0))
             .sense(Sense::click()),
     );
+	
+	if btn.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
 
     if btn.clicked() {
         state.open = !state.open;

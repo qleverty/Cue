@@ -13,22 +13,28 @@ impl Default for TimeInputState {
 }
 
 impl TimeInputState {
+    fn resolved(&self) -> Option<(u8, u8)> {
+        let h = match (self.digits[0], self.digits[1]) {
+            (Some(h1), Some(h0)) => h1 * 10 + h0,
+            (Some(h1), None)     => h1,
+            (None,     Some(h0)) => h0,
+            (None,     None)     => return None,
+        };
+        let m = match (self.digits[2], self.digits[3]) {
+            (Some(m1), Some(m0)) => m1 * 10 + m0,
+            (Some(m1), None)     => m1,
+            (None,     Some(m0)) => m0,
+            (None,     None)     => return None,
+        };
+        if h <= 23 && m <= 59 { Some((h, m)) } else { None }
+    }
+
     pub fn is_valid(&self) -> bool {
-        match self.digits {
-            [Some(h1), Some(h0), Some(m1), Some(m0)] => {
-                h1 * 10 + h0 <= 23 && m1 * 10 + m0 <= 59
-            }
-            _ => false,
-        }
+        self.resolved().is_some()
     }
 
     pub fn to_time_string(&self) -> Option<String> {
-        match self.digits {
-            [Some(h1), Some(h0), Some(m1), Some(m0)] if self.is_valid() => {
-                Some(format!("{}{}:{}{}", h1, h0, m1, m0))
-            }
-            _ => None,
-        }
+        self.resolved().map(|(h, m)| format!("{:02}:{:02}", h, m))
     }
 
     pub fn clear(&mut self) {
