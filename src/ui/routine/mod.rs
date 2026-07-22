@@ -136,10 +136,12 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
     ui.add_space(1.0);
 
+    let avail_h = ui.available_height() - (1.0 + 8.0 + 22.0 + 8.0);
+
     match state.tab {
-        RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct),
-        RoutineTab::Week   => tab_week::draw(ui, &mut state.week),
-        RoutineTab::Month  => tab_month::draw(ui, &mut state.month),
+        RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct, avail_h),
+        RoutineTab::Week   => tab_week::draw(ui, &mut state.week, avail_h),
+        RoutineTab::Month  => tab_month::draw(ui, &mut state.month, avail_h),
     }
 
     let y = ui.next_widget_position().y;

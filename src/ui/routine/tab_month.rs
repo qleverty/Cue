@@ -16,7 +16,7 @@ impl Default for MonthState {
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
+pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, avail_h: f32) {
     ui.add_space(10.0);
 
     let gap   = 4.0_f32;
@@ -82,8 +82,9 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
             ui.label(RichText::new("Нет дат").color(Color32::from_white_alpha(30)).size(11.5));
         });
     } else {
-        let scroll_h = (state.entries.len().min(5) as f32) * 20.0;
-        ScrollArea::vertical().max_height(scroll_h).show(ui, |ui| {
+        let fixed  = 10.0 + 3.0 * 18.0 + 2.0 * 4.0 + 6.0 + 22.0 + 8.0;
+        let list_h = (avail_h - fixed).max(0.0);
+        ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let mut remove = None;
             for (i, (day, time)) in state.entries.iter().enumerate() {

@@ -22,7 +22,7 @@ impl Default for WeekState {
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, state: &mut WeekState) {
+pub fn draw(ui: &mut egui::Ui, state: &mut WeekState, avail_h: f32) {
     ui.add_space(10.0);
 
     let gap      = 4.0_f32;
@@ -87,18 +87,12 @@ pub fn draw(ui: &mut egui::Ui, state: &mut WeekState) {
     if state.entries.is_empty() {
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.label(
-                RichText::new("Нет дней")
-                    .color(Color32::from_white_alpha(30))
-                    .size(11.5),
-            );
+            ui.label(RichText::new("Нет дней").color(Color32::from_white_alpha(30)).size(11.5));
         });
     } else {
-        let entry_h    = 20.0;
-        let max_visible = 5;
-        let scroll_h   = (state.entries.len().min(max_visible) as f32) * entry_h;
-
-        ScrollArea::vertical().max_height(scroll_h).show(ui, |ui| {
+        let fixed  = 10.0 + 20.0 + 6.0 + 22.0 + 8.0;
+        let list_h = (avail_h - fixed).max(0.0);
+        ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let mut remove = None;
             for (i, (day_idx, time)) in state.entries.iter().enumerate() {

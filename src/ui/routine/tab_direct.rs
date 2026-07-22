@@ -34,7 +34,7 @@ impl Default for DirectState {
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
+pub fn draw(ui: &mut egui::Ui, state: &mut DirectState, avail_h: f32) {
     ui.add_space(10.0);
 
     ui.horizontal(|ui| {
@@ -61,25 +61,17 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
 
     ui.add_space(8.0);
 
-    let entry_h = 20.0;
-    let max_visible = 5;
-    let scroll_h = (state.entries.len().min(max_visible) as f32) * entry_h;
+    let fixed   = 10.0 + 22.0 + 8.0;
+    let list_h  = (avail_h - fixed).max(0.0);
 
     if state.entries.is_empty() {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
-            ui.label(
-                RichText::new("Нет дат")
-                    .color(Color32::from_white_alpha(30))
-                    .size(11.5),
-            );
+            ui.label(RichText::new("Нет дат").color(Color32::from_white_alpha(30)).size(11.5));
         });
-        ui.add_space(4.0);
     } else {
-        ScrollArea::vertical()
-            .max_height(scroll_h)
-            .show(ui, |ui| {
+        ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 let mut remove = None;
                 for (i, entry) in state.entries.iter().enumerate() {
