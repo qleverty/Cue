@@ -136,31 +136,32 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
     ui.add_space(1.0);
 
-    let avail_h = ui.available_height() - (1.0 + 8.0 + 22.0 + 8.0);
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.add_space(14.0);
+            let save = ui.add(
+                egui::Button::new(
+                    RichText::new("Сохранить")
+                        .color(Color32::from_white_alpha(180))
+                        .size(12.0),
+                )
+                .min_size(vec2(RW - 28.0, 22.0)),
+            );
+            if save.clicked() { close = true; }
+        });
+        let y = ui.next_widget_position().y;
+        ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
+        ui.add_space(1.0);
 
-    match state.tab {
-        RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct, avail_h),
-        RoutineTab::Week   => tab_week::draw(ui, &mut state.week, avail_h),
-        RoutineTab::Month  => tab_month::draw(ui, &mut state.month, avail_h),
-    }
-
-    let y = ui.next_widget_position().y;
-    ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
-
-    ui.add_space(8.0);
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        let save = ui.add(
-            egui::Button::new(
-                RichText::new("Сохранить")
-                    .color(Color32::from_white_alpha(180))
-                    .size(12.0),
-            )
-            .min_size(vec2(RW - 28.0, 22.0)),
-        );
-        if save.clicked() { close = true; }
+        ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+            match state.tab {
+                RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct),
+                RoutineTab::Week   => tab_week::draw(ui, &mut state.week),
+                RoutineTab::Month  => tab_month::draw(ui, &mut state.month),
+            }
+        });
     });
-    ui.add_space(8.0);
 
     close
 }
