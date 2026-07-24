@@ -16,7 +16,8 @@ impl Default for MonthState {
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
+pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
+    ui.set_max_height(list_h);
     ui.add_space(10.0);
 
     let gap   = 4.0_f32;

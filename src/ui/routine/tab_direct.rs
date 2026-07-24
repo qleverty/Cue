@@ -34,7 +34,8 @@ impl Default for DirectState {
     }
 }
 
-pub fn draw(ui: &mut egui::Ui, state: &mut DirectState) {
+pub fn draw(ui: &mut egui::Ui, state: &mut DirectState, list_h: f32) {
+    ui.set_max_height(list_h);
     ui.add_space(10.0);
 
     ui.horizontal(|ui| {
