@@ -42,7 +42,7 @@ pub const BG:  Color32 = Color32::from_rgba_premultiplied(9, 9, 9, 222);
 pub const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
 static TICK_PNG:  &[u8] = include_bytes!("../pics/tick.png");
-static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
+pub static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
 static ICON_PNG:  &[u8] = include_bytes!("../icon.png");
 
 // ── paths ─────────────────────────────────────────────────────────────────────

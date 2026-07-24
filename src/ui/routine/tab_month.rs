@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, RichText, ScrollArea, Sense, vec2};
+use eframe::egui::{self, Color32, ImageSource, RichText, ScrollArea, Sense, vec2};
 
 pub struct MonthState {
     pub selected_days: [bool; 31],
@@ -17,7 +17,6 @@ impl Default for MonthState {
 }
 
 pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
-    ui.set_max_height(list_h);
     ui.add_space(10.0);
 
     let gap   = 4.0_f32;
@@ -83,7 +82,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
             ui.label(RichText::new("Нет дат").color(Color32::from_white_alpha(30)).size(11.5));
         });
     } else {
-        ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
+        ScrollArea::vertical().max_height(list_h - 20.0).show(ui, |ui| {
             ui.add_space(-4.0);
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let mut remove = None;
@@ -93,12 +92,23 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
                     ui.label(RichText::new(format!("{} числа · {}", day, time))
                         .color(Color32::from_white_alpha(160)).size(11.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(14.0);
-                        let x = ui.add(egui::Label::new(
-                            RichText::new("×").color(Color32::from_white_alpha(60)).size(13.0)
-                        ).sense(Sense::click()));
+                        ui.add_space(2.0);
+                        let del_rect = egui::Rect::from_min_size(
+                            ui.next_widget_position(),
+                            vec2(15.0, 15.0),
+                        );
+                        let x = ui.allocate_rect(del_rect, egui::Sense::click());
+                        let tint = if x.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                            Color32::WHITE
+                        } else {
+                            Color32::from_gray(130)
+                        };
+                        ui.put(del_rect, egui::Image::new(ImageSource::Bytes {
+                            uri: "bytes://cross.png".into(),
+                            bytes: crate::CROSS_PNG.into(),
+                        }).fit_to_exact_size(vec2(8.0, 8.0)).tint(tint));
                         if x.clicked() { remove = Some(i); }
-                        if x.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
                     });
                 });
                 ui.add_space(2.0);
