@@ -137,7 +137,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     ui.add_space(1.0);
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
-        ui.add_space(8.0);
+        ui.add_space(15.0);
         ui.horizontal(|ui| {
             ui.add_space(14.0);
             let save = ui.add(
@@ -150,10 +150,6 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
             );
             if save.clicked() { close = true; }
         });
-        let y = ui.next_widget_position().y;
-        ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
-        ui.add_space(1.0);
-
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
             match state.tab {
                 RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct),

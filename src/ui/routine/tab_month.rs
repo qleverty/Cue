@@ -83,6 +83,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState) {
         });
     } else {
         ScrollArea::vertical().max_height(ui.available_height()).show(ui, |ui| {
+            ui.add_space(-4.0);
             ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
             let mut remove = None;
             for (i, (day, time)) in state.entries.iter().enumerate() {
