@@ -9,9 +9,9 @@ use crate::BG;
 
 pub const RW: f32 = 254.0;
 
-pub const RH_DIRECT: f32 = 340.0;
-pub const RH_WEEK:   f32 = 300.0;
-pub const RH_MONTH:  f32 = 300.0;
+pub const RH_DIRECT: f32 = 200.0;
+pub const RH_WEEK:   f32 = 225.0;
+pub const RH_MONTH:  f32 = 285.0;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum RoutineTab { Direct, Week, Month }
@@ -136,7 +136,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
     ui.add_space(1.0);
 
-    let list_h = ui.available_height() - 19.0 - 22.0; // pad + button
+    let list_h = ui.available_height() - 110.0 - 22.0; // pad + button
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(15.0);

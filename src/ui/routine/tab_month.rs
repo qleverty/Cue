@@ -91,25 +91,23 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
                     ui.add_space(14.0);
                     ui.label(RichText::new(format!("{} числа · {}", day, time))
                         .color(Color32::from_white_alpha(160)).size(11.5));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_space(2.0);
-                        let del_rect = egui::Rect::from_min_size(
-                            ui.next_widget_position(),
-                            vec2(15.0, 15.0),
-                        );
-                        let x = ui.allocate_rect(del_rect, egui::Sense::click());
-                        let tint = if x.hovered() {
-                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                            Color32::WHITE
-                        } else {
-                            Color32::from_gray(130)
-                        };
-                        ui.put(del_rect, egui::Image::new(ImageSource::Bytes {
-                            uri: "bytes://cross.png".into(),
-                            bytes: crate::CROSS_PNG.into(),
-                        }).fit_to_exact_size(vec2(8.0, 8.0)).tint(tint));
-                        if x.clicked() { remove = Some(i); }
-                    });
+                    let row = ui.max_rect();
+                    let del_rect = egui::Rect::from_min_size(
+                        egui::pos2(row.right() - 29.0, row.top() + (row.height() - 15.0) / 2.0),
+                        vec2(15.0, 15.0),
+                    );
+                    let x = ui.allocate_rect(del_rect, egui::Sense::click());
+                    let tint = if x.hovered() {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        Color32::WHITE
+                    } else {
+                        Color32::from_gray(130)
+                    };
+                    ui.put(del_rect, egui::Image::new(ImageSource::Bytes {
+                        uri: "bytes://cross.png".into(),
+                        bytes: crate::CROSS_PNG.into(),
+                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(tint));
+                    if x.clicked() { remove = Some(i); }
                 });
                 ui.add_space(2.0);
             }
