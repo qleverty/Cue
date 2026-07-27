@@ -1,4 +1,4 @@
-use eframe::egui::{self, Color32, ImageSource, RichText, ScrollArea, Sense, vec2};
+use eframe::egui::{self, Color32, ImageSource, RichText, ScrollArea, vec2};
 
 pub struct MonthState {
     pub selected_days: [bool; 31],
@@ -42,6 +42,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
                     .fill(if selected { Color32::from_white_alpha(35) } else { Color32::from_white_alpha(8) }),
                 );
                 if btn.clicked() { state.selected_days[i] = !state.selected_days[i]; }
+                if btn.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
             }
         });
         if ri < 2 { ui.add_space(gap); }
@@ -62,6 +63,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
             )
             .min_size(vec2(24.0, 0.0)),
         );
+        if btn.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
         if btn.clicked() {
             if let Some(time) = state.time_input.to_time_string() {
                 for (i, &sel) in state.selected_days.iter().enumerate() {

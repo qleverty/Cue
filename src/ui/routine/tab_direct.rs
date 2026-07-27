@@ -49,6 +49,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut DirectState, list_h: f32) {
             egui::Button::new(RichText::new("+").color(Color32::from_white_alpha(180)).size(14.0))
                 .min_size(vec2(24.0, 0.0)),
         );
+        if btn.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
         if btn.clicked() {
             if let (Some((d, m, y)), Some(time)) = (state.date.selected, state.time_input.to_time_string()) {
                 state.entries.push(DirectEntry { day: d, month: m, year: y, time });

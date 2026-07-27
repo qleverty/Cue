@@ -52,6 +52,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut WeekState, list_h: f32) {
             if btn.clicked() {
                 state.selected_days[i] = !state.selected_days[i];
             }
+            if btn.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
         }
     });
 
@@ -70,6 +71,7 @@ pub fn draw(ui: &mut egui::Ui, state: &mut WeekState, list_h: f32) {
             )
             .min_size(vec2(24.0, 0.0)),
         );
+        if btn.hovered() { ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand); }
         if btn.clicked() {
             if let Some(time) = state.time_input.to_time_string() {
                 for (i, &sel) in state.selected_days.iter().enumerate() {
