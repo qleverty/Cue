@@ -5,6 +5,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod settings;
 pub mod project;
+pub mod routine_scheduler;
 pub mod sync;
 pub mod ui;
 
@@ -227,6 +228,9 @@ struct App {
     project_buf:           String,
     project_need_focus:    bool,
     project_new_color_idx: usize,
+    /// Момент последней проверки планировщика рутин (routine_scheduler::local_now()).
+    /// См. Cue_Routines_Implementation_Plan.txt, Этап 5.
+    last_routine_tick:     u64,
 }
 
 impl App {
@@ -279,6 +283,7 @@ impl App {
             project_buf:           String::new(),
             project_need_focus:    false,
             project_new_color_idx: 0,
+            last_routine_tick:     0, // 0 → первый тик в update() сработает сразу
         };
 
         if app.settings.reset_on_startup {
@@ -295,6 +300,65 @@ impl App {
         self.active_project_idx = idx;
         self.settings.last_project_id = Some(self.projects[idx].id.clone());
         self.settings.save();
+    }
+
+    /// Тик планировщика рутин — см. Cue_Routines_Implementation_Plan.txt,
+    /// Этап 5. Вызывается из ui() не чаще, чем раз в TICK_INTERVAL_SECS
+    /// (ui() и так гарантированно зовётся минимум раз в секунду благодаря
+    /// ctx.request_repaint_after(1 сек) выше).
+    fn routine_tick(&mut self) {
+        // Маленький интервал для ручного тестирования Этапа 5 — после
+        // подтверждения, что механизм работает, стоит увеличить до 60
+        // (раз в минуту, как в исходном design-доке).
+        const TICK_INTERVAL_SECS: u64 = 5;
+
+        let now = routine_scheduler::local_now();
+        if now < self.last_routine_tick + TICK_INTERVAL_SECS { return; }
+        self.last_routine_tick = now;
+
+        for proj in &mut self.projects {
+            // main: рутина там в норме уже active=true (см. раздел 1 плана —
+            // "не может быть неактивной и в main"), но проверяем защитно,
+            // без репозиционирования (main — всегда 0/1 элемент).
+            for task in proj.main.values_mut() {
+                if let Some(routine) = task.routine.as_mut() {
+                    if !routine.active && routine_scheduler::is_due(routine, now) {
+                        routine.active = true;
+                        routine.last_triggered_at = now;
+                        routine_scheduler::on_activated(&proj.name, &task.text);
+                    }
+                }
+            }
+
+            // subs: сначала собрать id для флипа (без мутации порядка),
+            // потом вынуть/флипнуть/вставить перед группой неактивных —
+            // иначе только что активировавшаяся рутина осталась бы физически
+            // в хвосте "неактивной" зоны до следующей перезагрузки, ломая
+            // инвариант "активные впереди" (см. раздел 5.3 плана).
+            let to_flip: Vec<String> = proj.subs.iter()
+                .filter_map(|(id, t)| {
+                    let r = t.routine.as_ref()?;
+                    (!r.active && routine_scheduler::is_due(r, now)).then(|| id.clone())
+                })
+                .collect();
+
+            let changed = !to_flip.is_empty();
+            for id in to_flip {
+                let Some(idx) = proj.subs.get_index_of(&id) else { continue };
+                let (id, mut task) = proj.subs.shift_remove_index(idx).unwrap();
+                if let Some(routine) = task.routine.as_mut() {
+                    routine.active = true;
+                    routine.last_triggered_at = now;
+                }
+                routine_scheduler::on_activated(&proj.name, &task.text);
+                let pos = proj.active_group_end();
+                proj.subs.shift_insert(pos, id, task);
+            }
+
+            if changed {
+                proj.save();
+            }
+        }
     }
 }
 
@@ -340,6 +404,10 @@ impl eframe::App for App {
         }
         // Fallback: wake egui periodically in case no sync activity.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
+
+        // ── тик планировщика рутин (Cue_Routines_Implementation_Plan.txt,
+        //    Этап 5) ────────────────────────────────────────────────────
+        self.routine_tick();
 
         let window_focused = ctx.input(|i| i.focused);
         if window_focused && !self.adding {
@@ -387,7 +455,7 @@ impl eframe::App for App {
                             });
                             self.projects[idx].main.insert(
                                 task_id,
-                                project::TaskData { text: first, active: true, schedule: None, created_at: ts, order_key: 0.0 },
+                                project::TaskData { text: first, routine: None, created_at: ts, order_key: 0.0 },
                             );
                         }
                         for text in iter {
@@ -854,7 +922,7 @@ impl eframe::App for App {
                         task_id,
                     });
                 }
-                self.projects[idx].complete_main();
+                self.projects[idx].complete_main(routine_scheduler::local_now());
                 if !self.settings.reset_on_startup { self.projects[idx].save(); }
             }
             ui.add_space(8.0);

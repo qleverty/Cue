@@ -63,8 +63,8 @@ pub fn apply_op(
             if proj.main.contains_key(task_id.as_str())
                 || proj.subs.contains_key(task_id.as_str()) { return None; }
             let task = TaskData {
-                text: text.clone(), active: true,
-                schedule: None, created_at: op.ts, order_key: 0.0,
+                text: text.clone(), routine: None,
+                created_at: op.ts, order_key: 0.0,
             };
             match target {
                 AddTarget::Main => {
@@ -77,7 +77,11 @@ pub fn apply_op(
                 }
                 AddTarget::End => {
                     let mut t = task; t.order_key = proj.next_end_key();
-                    proj.subs.insert(task_id.clone(), t);
+                    // новая задача всегда активна (routine: None) — вставляем
+                    // перед группой неактивных рутин, не в физический конец
+                    // (см. project.rs::active_group_end).
+                    let pos = proj.active_group_end();
+                    proj.subs.shift_insert(pos, task_id.clone(), t);
                 }
                 AddTarget::Beginning => {
                     let mut t = task; t.order_key = proj.next_beg_key();
@@ -98,7 +102,20 @@ pub fn apply_op(
             if tombstones.deleted_at(project_id).is_some() { return None; }
             let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
             if !proj.main.contains_key(task_id.as_str()) { return None; }
-            proj.complete_main();
+            // op.ts — момент, когда завершение реально произошло на исходном
+            // устройстве; используем его же для проверки "все ли direct-даты
+            // рутины уже прошли" (см. раздел 5.2/7.1 плана — намеренное
+            // упрощение вместо отдельного сравнения меток).
+            proj.complete_main(op.ts);
+            Some(project_id.clone())
+        }
+        OpKind::SetRoutine { project_id, task_id, routine } => {
+            if tombstones.deleted_at(project_id)
+                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
+            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
+            let task = proj.main.get_mut(task_id.as_str())
+                .or_else(|| proj.subs.get_mut(task_id.as_str()))?;
+            task.routine = routine.clone();
             Some(project_id.clone())
         }
         OpKind::PromoteTask { project_id, task_id } => {

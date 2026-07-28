@@ -31,6 +31,11 @@ pub enum OpKind {
     PromoteTask    { project_id: String, task_id: String },
     #[serde(rename = "EDIT_TASK")]
     EditTask       { project_id: String, task_id: String, text: String },
+    /// Полная перезапись расписания задачи. `routine: None` — убрать
+    /// рутину целиком (задача остаётся обычной). Без диффов — см.
+    /// Cue_Routines_Implementation_Plan.txt, раздел 4.
+    #[serde(rename = "SET_ROUTINE")]
+    SetRoutine     { project_id: String, task_id: String, routine: Option<crate::project::Routine> },
     #[serde(rename = "SET_SHARED_SETTING")]
     SetSharedSetting { key: String, value: serde_json::Value },
 }
@@ -89,6 +94,7 @@ impl OpLog {
             OpKind::CompleteMain   { .. } => "COMPLETE_MAIN",
             OpKind::PromoteTask    { .. } => "PROMOTE_TASK",
             OpKind::EditTask       { .. } => "EDIT_TASK",
+            OpKind::SetRoutine     { .. } => "SET_ROUTINE",
             OpKind::SetSharedSetting{..}  => "SET_SHARED_SETTING",
         };
         crate::clog!("[oplog] append seq={} op={op_name} path={:?}", self.next_seq, self.path);
