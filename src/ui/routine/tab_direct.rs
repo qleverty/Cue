@@ -16,6 +16,19 @@ impl DirectEntry {
     pub fn to_routine_string(&self) -> String {
         format!("{:04}-{:02}-{:02} {}", self.year, self.month + 1, self.day, self.time)
     }
+
+    /// Обратный парсер: "YYYY-MM-DD HH:MM" -> DirectEntry. None при любом
+    /// несовпадении формата — такие записи молча пропускаются при load_from.
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut parts = s.splitn(2, ' ');
+        let date = parts.next()?;
+        let time = parts.next()?.to_string();
+        let mut d = date.splitn(3, '-');
+        let year:  i32   = d.next()?.parse().ok()?;
+        let month: usize = d.next()?.parse::<usize>().ok()?.checked_sub(1)?;
+        let day:   u32   = d.next()?.parse().ok()?;
+        Some(Self { day, month, year, time })
+    }
 }
 
 pub struct DirectState {
@@ -31,6 +44,22 @@ impl Default for DirectState {
             time_input: super::time_input::TimeInputState::default(),
             entries:    Vec::new(),
         }
+    }
+}
+
+impl DirectState {
+    /// Полностью перезаписывает entries из строк модели (или очищает, если
+    /// пусто). Также сбрасывает виджеты ввода даты/времени — это открытие
+    /// окна "с нуля", а не мердж с тем, что было введено на экране.
+    pub fn load_from(&mut self, entries: &[String]) {
+        self.entries = entries.iter().filter_map(|s| DirectEntry::parse(s)).collect();
+        self.entries.sort_by(|a, b| (a.year, a.month, a.day, &a.time).cmp(&(b.year, b.month, b.day, &b.time)));
+        self.date       = date_picker::DatePickerState::default();
+        self.time_input = super::time_input::TimeInputState::default();
+    }
+
+    pub fn to_strings(&self) -> Vec<String> {
+        self.entries.iter().map(DirectEntry::to_routine_string).collect()
     }
 }
 

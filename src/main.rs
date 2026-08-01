@@ -490,13 +490,37 @@ impl eframe::App for App {
         }
 
         if let Screen::Routine = self.screen {
-            let close = ui::routine::draw(&ctx, ui, &mut self.routine_ui);
+            let action = ui::routine::draw(&ctx, ui, &mut self.routine_ui);
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(
                 vec2(ui::routine::RW, self.routine_ui.target_height()),
             ));
-            if close {
-                self.screen = Screen::Main;
-                self.last_h = 0.0;
+            match action {
+                ui::routine::CloseAction::Save => {
+                    let idx     = self.active_project_idx;
+                    let task_id = self.routine_ui.task_id.clone();
+                    let routine = self.routine_ui.build_routine();
+
+                    let _ = self.sync.record_op(sync::oplog::OpKind::SetRoutine {
+                        project_id: self.projects[idx].id.clone(),
+                        task_id:    task_id.clone(),
+                        routine:    routine.clone(),
+                    });
+                    let proj = &mut self.projects[idx];
+                    if let Some(task) = proj.main.get_mut(task_id.as_str()) {
+                        task.routine = routine;
+                    } else if let Some(task) = proj.subs.get_mut(task_id.as_str()) {
+                        task.routine = routine;
+                    }
+                    if !self.settings.reset_on_startup { self.projects[idx].save(); }
+
+                    self.screen = Screen::Main;
+                    self.last_h = 0.0;
+                }
+                ui::routine::CloseAction::Cancel => {
+                    self.screen = Screen::Main;
+                    self.last_h = 0.0;
+                }
+                ui::routine::CloseAction::None => {}
             }
             return;
         }
@@ -1028,13 +1052,14 @@ impl eframe::App for App {
             }
             if let Some(i) = open_routine {
                 let idx = self.active_project_idx;
-                if let Some((task_id, task)) = self.projects[idx].subs.get_index(i) {
-                    self.routine_ui.task_id   = task_id.clone();
-                    self.routine_ui.task_name = task.text.clone();
+                let loaded = self.projects[idx].subs.get_index(i)
+                    .map(|(id, t)| (id.clone(), t.text.clone(), t.routine.clone()));
+                if let Some((task_id, task_name, routine)) = loaded {
+                    self.routine_ui.load(task_id, task_name, routine.as_ref());
                 }
                 self.screen = Screen::Routine;
                 ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                    vec2(ui::routine::RW, ui::routine::RW),
+                    vec2(ui::routine::RW, self.routine_ui.target_height()),
                 ));
             }
             if let Some(i) = delete {

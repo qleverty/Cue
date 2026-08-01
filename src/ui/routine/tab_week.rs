@@ -5,6 +5,9 @@ const DAY_FULL:  [&str; 7] = [
     "Понедельник", "Вторник",  "Среда",
     "Четверг",     "Пятница",  "Суббота", "Воскресенье",
 ];
+/// Коды дней в строках модели ("<code> HH:MM"), порядок совпадает с
+/// DAY_SHORT/DAY_FULL/selected_days: 0=Пн...6=Вс.
+pub const DAY_CODE: [&str; 7] = ["mo", "tu", "we", "th", "fr", "sa", "su"];
 
 pub struct WeekState {
     pub selected_days: [bool; 7],
@@ -19,6 +22,25 @@ impl Default for WeekState {
             time_input:    super::time_input::TimeInputState::default(),
             entries:       Vec::new(),
         }
+    }
+}
+
+impl WeekState {
+    pub fn load_from(&mut self, entries: &[String]) {
+        self.entries = entries.iter().filter_map(|s| {
+            let mut parts = s.splitn(2, ' ');
+            let code = parts.next()?;
+            let time = parts.next()?.to_string();
+            let idx  = DAY_CODE.iter().position(|&c| c == code)?;
+            Some((idx, time))
+        }).collect();
+        self.entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        self.selected_days = [false; 7];
+        self.time_input     = super::time_input::TimeInputState::default();
+    }
+
+    pub fn to_strings(&self) -> Vec<String> {
+        self.entries.iter().map(|(i, t)| format!("{} {}", DAY_CODE[*i], t)).collect()
     }
 }
 

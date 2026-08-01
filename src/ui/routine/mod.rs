@@ -16,6 +16,13 @@ pub const RH_MONTH:  f32 = 285.0;
 #[derive(PartialEq, Clone, Copy)]
 pub enum RoutineTab { Direct, Week, Month }
 
+/// Что должно произойти при закрытии окна редактора рутины.
+/// `None` — окно остаётся открытым (обычный кадр отрисовки).
+/// `Cancel` — закрыть без сохранения (крестик).
+/// `Save`   — собрать Routine из состояния и сохранить (кнопка "Сохранить").
+#[derive(PartialEq, Clone, Copy)]
+pub enum CloseAction { None, Cancel, Save }
+
 pub struct RoutineUiState {
     pub task_id:   String,
     pub task_name: String,
@@ -23,6 +30,10 @@ pub struct RoutineUiState {
     pub direct:    tab_direct::DirectState,
     pub week:      tab_week::WeekState,
     pub month:     tab_month::MonthState,
+    /// Переносятся из исходной Routine через load() и обратно через
+    /// build_routine() как есть — UI их не редактирует напрямую.
+    pub active:            bool,
+    pub last_triggered_at: u64,
 }
 
 impl Default for RoutineUiState {
@@ -34,6 +45,8 @@ impl Default for RoutineUiState {
             direct:    tab_direct::DirectState::default(),
             week:      tab_week::WeekState::default(),
 			month:     tab_month::MonthState::default(),
+            active:            false,
+            last_triggered_at: 0,
         }
     }
 }
@@ -46,9 +59,60 @@ impl RoutineUiState {
             RoutineTab::Month  => RH_MONTH,
         }
     }
+
+    /// Полностью перезаписывает состояние окна из реальных данных задачи.
+    /// Вызывается при каждом открытии окна — чинит баг, при котором старое
+    /// состояние утекало между открытиями в рамках одного запуска.
+    pub fn load(&mut self, task_id: String, task_name: String, routine: Option<&crate::project::Routine>) {
+        self.task_id   = task_id;
+        self.task_name = task_name;
+
+        let empty: Vec<String> = Vec::new();
+        let (week, month, direct, active, last_triggered_at) = match routine {
+            Some(r) => (
+                r.week.as_deref().unwrap_or(&empty),
+                r.month.as_deref().unwrap_or(&empty),
+                r.direct.as_deref().unwrap_or(&empty),
+                r.active,
+                r.last_triggered_at,
+            ),
+            None => (empty.as_slice(), empty.as_slice(), empty.as_slice(), false, 0),
+        };
+
+        self.direct.load_from(direct);
+        self.week.load_from(week);
+        self.month.load_from(month);
+        self.active            = active;
+        self.last_triggered_at = last_triggered_at;
+
+        // Какую вкладку показать при открытии: week -> month -> direct
+        // (первая непустая; UX по факту один тип на рутину за раз).
+        self.tab = if !week.is_empty() {
+            RoutineTab::Week
+        } else if !month.is_empty() {
+            RoutineTab::Month
+        } else {
+            RoutineTab::Direct
+        };
+    }
+
+    /// Собирает Routine из текущего состояния вкладок + сохранённых
+    /// active/last_triggered_at. None, если получившаяся Routine пуста —
+    /// сохранение с пустым редактором = удаление рутины у задачи.
+    pub fn build_routine(&self) -> Option<crate::project::Routine> {
+        let to_opt = |v: Vec<String>| if v.is_empty() { None } else { Some(v) };
+        let routine = crate::project::Routine {
+            week:               to_opt(self.week.to_strings()),
+            month:              to_opt(self.month.to_strings()),
+            direct:             to_opt(self.direct.to_strings()),
+            active:             self.active,
+            last_triggered_at:  self.last_triggered_at,
+        };
+        if routine.is_empty() { None } else { Some(routine) }
+    }
 }
 
-pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) -> bool {
+pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) -> CloseAction {
     ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
 
@@ -56,7 +120,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     let drag = ui.allocate_rect(bar_rect, Sense::drag());
     if drag.dragged() { ctx.send_viewport_cmd(ViewportCommand::StartDrag); }
 
-    let mut close = false;
+    let mut action = CloseAction::None;
 
     let close_center = bar_rect.max - vec2(11.0, 2.0);
     let close_r = ui.allocate_rect(
@@ -75,7 +139,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
         let bot = c + vec2(-2.5,  3.8);
         ui.painter().add(Shape::convex_polygon(vec![tip, top, bot], close_col, Stroke::NONE));
     }
-    if close_r.clicked() { close = true; }
+    if close_r.clicked() { action = CloseAction::Cancel; }
 
     let c = bar_rect.center();
     for x in [-6.0f32, 0.0, 6.0] {
@@ -150,7 +214,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
                 )
                 .min_size(vec2(RW - 28.0, 22.0)),
             );
-            if save.clicked() { close = true; }
+            if save.clicked() { action = CloseAction::Save; }
         });
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
             match state.tab {
@@ -161,5 +225,5 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
         });
     });
 
-    close
+    action
 }

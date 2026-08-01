@@ -16,6 +16,24 @@ impl Default for MonthState {
     }
 }
 
+impl MonthState {
+    pub fn load_from(&mut self, entries: &[String]) {
+        self.entries = entries.iter().filter_map(|s| {
+            let mut parts = s.splitn(2, ' ');
+            let day:  u32 = parts.next()?.parse().ok()?;
+            let time      = parts.next()?.to_string();
+            Some((day, time))
+        }).collect();
+        self.entries.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        self.selected_days = [false; 31];
+        self.time_input     = super::time_input::TimeInputState::default();
+    }
+
+    pub fn to_strings(&self) -> Vec<String> {
+        self.entries.iter().map(|(d, t)| format!("{} {}", d, t)).collect()
+    }
+}
+
 pub fn draw(ui: &mut egui::Ui, state: &mut MonthState, list_h: f32) {
     ui.add_space(10.0);
 
