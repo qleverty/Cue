@@ -17,11 +17,11 @@ pub const RH_MONTH:  f32 = 285.0;
 pub enum RoutineTab { Direct, Week, Month }
 
 /// Что должно произойти при закрытии окна редактора рутины.
-/// `None` — окно остаётся открытым (обычный кадр отрисовки).
-/// `Cancel` — закрыть без сохранения (крестик).
-/// `Save`   — собрать Routine из состояния и сохранить (кнопка "Сохранить").
+/// `None`  — окно остаётся открытым (обычный кадр отрисовки).
+/// `Close` — закрыть; вызывающий код сам решает, менялось ли что-то
+/// (сравнивая build_routine() с original), и коммитит только при изменении.
 #[derive(PartialEq, Clone, Copy)]
-pub enum CloseAction { None, Cancel, Save }
+pub enum CloseAction { None, Close }
 
 pub struct RoutineUiState {
     pub task_id:   String,
@@ -34,6 +34,10 @@ pub struct RoutineUiState {
     /// build_routine() как есть — UI их не редактирует напрямую.
     pub active:            bool,
     pub last_triggered_at: u64,
+    /// Снимок того, что было загружено через load() — используется
+    /// вызывающим кодом, чтобы не писать SetRoutine/не дёргать save(),
+    /// если пользователь ничего не поменял (просто открыл посмотреть).
+    pub original: Option<crate::project::Routine>,
 }
 
 impl Default for RoutineUiState {
@@ -47,6 +51,7 @@ impl Default for RoutineUiState {
 			month:     tab_month::MonthState::default(),
             active:            false,
             last_triggered_at: 0,
+            original:  None,
         }
     }
 }
@@ -84,6 +89,7 @@ impl RoutineUiState {
         self.month.load_from(month);
         self.active            = active;
         self.last_triggered_at = last_triggered_at;
+        self.original           = routine.cloned();
 
         // Какую вкладку показать при открытии: week -> month -> direct
         // (первая непустая; UX по факту один тип на рутину за раз).
@@ -139,7 +145,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
         let bot = c + vec2(-2.5,  3.8);
         ui.painter().add(Shape::convex_polygon(vec![tip, top, bot], close_col, Stroke::NONE));
     }
-    if close_r.clicked() { action = CloseAction::Cancel; }
+    if close_r.clicked() { action = CloseAction::Close; }
 
     let c = bar_rect.center();
     for x in [-6.0f32, 0.0, 6.0] {
@@ -204,18 +210,6 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(15.0);
-        ui.horizontal(|ui| {
-            ui.add_space(14.0);
-            let save = ui.add(
-                egui::Button::new(
-                    RichText::new("Сохранить")
-                        .color(Color32::from_white_alpha(180))
-                        .size(12.0),
-                )
-                .min_size(vec2(RW - 28.0, 22.0)),
-            );
-            if save.clicked() { action = CloseAction::Save; }
-        });
         ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
             match state.tab {
                 RoutineTab::Direct => tab_direct::draw(ui, &mut state.direct, list_h),

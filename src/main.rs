@@ -302,6 +302,32 @@ impl App {
         self.settings.save();
     }
 
+    /// Коммитит текущее состояние окна редактора рутины в модель/оплог/диск —
+    /// но только если оно реально отличается от того, что было при open()
+    /// (иначе просто открыл посмотреть и закрыл — не спамим SetRoutine).
+    /// Не трогает self.screen — вызывающий код сам решает, что дальше
+    /// (закрыть окно редактора или продолжить закрытие всего приложения).
+    fn commit_routine_editor(&mut self) {
+        let routine = self.routine_ui.build_routine();
+        if routine == self.routine_ui.original { return; }
+
+        let idx     = self.active_project_idx;
+        let task_id = self.routine_ui.task_id.clone();
+
+        let _ = self.sync.record_op(sync::oplog::OpKind::SetRoutine {
+            project_id: self.projects[idx].id.clone(),
+            task_id:    task_id.clone(),
+            routine:    routine.clone(),
+        });
+        let proj = &mut self.projects[idx];
+        if let Some(task) = proj.main.get_mut(task_id.as_str()) {
+            task.routine = routine;
+        } else if let Some(task) = proj.subs.get_mut(task_id.as_str()) {
+            task.routine = routine;
+        }
+        if !self.settings.reset_on_startup { self.projects[idx].save(); }
+    }
+
     /// Тик планировщика рутин — см. Cue_Routines_Implementation_Plan.txt,
     /// Этап 5. Вызывается из ui() не чаще, чем раз в TICK_INTERVAL_SECS
     /// (ui() и так гарантированно зовётся минимум раз в секунду благодаря
@@ -370,6 +396,14 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // ── Alt+F4 / закрытие всего окна: если в этот момент открыт редактор
+        // рутины — успеть закоммитить его состояние перед выходом. Не
+        // мешает крашу/убийству через диспетчер задач — там этот код просто
+        // не успевает выполниться, что и требуется.
+        if ctx.input(|i| i.viewport().close_requested()) && matches!(self.screen, Screen::Routine) {
+            self.commit_routine_editor();
+        }
 
         // ── drain incoming sync ops (written by engine thread) ────────────
         {
@@ -494,33 +528,10 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(
                 vec2(ui::routine::RW, self.routine_ui.target_height()),
             ));
-            match action {
-                ui::routine::CloseAction::Save => {
-                    let idx     = self.active_project_idx;
-                    let task_id = self.routine_ui.task_id.clone();
-                    let routine = self.routine_ui.build_routine();
-
-                    let _ = self.sync.record_op(sync::oplog::OpKind::SetRoutine {
-                        project_id: self.projects[idx].id.clone(),
-                        task_id:    task_id.clone(),
-                        routine:    routine.clone(),
-                    });
-                    let proj = &mut self.projects[idx];
-                    if let Some(task) = proj.main.get_mut(task_id.as_str()) {
-                        task.routine = routine;
-                    } else if let Some(task) = proj.subs.get_mut(task_id.as_str()) {
-                        task.routine = routine;
-                    }
-                    if !self.settings.reset_on_startup { self.projects[idx].save(); }
-
-                    self.screen = Screen::Main;
-                    self.last_h = 0.0;
-                }
-                ui::routine::CloseAction::Cancel => {
-                    self.screen = Screen::Main;
-                    self.last_h = 0.0;
-                }
-                ui::routine::CloseAction::None => {}
+            if let ui::routine::CloseAction::Close = action {
+                self.commit_routine_editor();
+                self.screen = Screen::Main;
+                self.last_h = 0.0;
             }
             return;
         }

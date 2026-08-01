@@ -51,7 +51,7 @@ pub fn projects_dir() -> std::path::PathBuf {
 /// раздел 1 — это отличается от исходного design-дока, где был единственный
 /// type). Пустой список никогда не хранится как `[]` — либо None, либо
 /// непустой Vec.
-#[derive(Serialize, Deserialize, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
 pub struct Routine {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub week:   Option<Vec<String>>,
