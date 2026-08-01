@@ -200,7 +200,20 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
                     .selectable(false),
             );
             if resp.clicked() { state.tab = tab.clone(); }
-            if resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+            if resp.hovered() && !active {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                // Overdraw with brighter color on hover (inactive tabs only —
+                // the active tab is already at full brightness).
+                ui.painter().text(
+                    resp.rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    *label,
+                    egui::FontId::proportional(12.0),
+                    Color32::from_white_alpha(160),
+                );
+            } else if resp.hovered() {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
             ui.add_space(gap);
         }
     });
