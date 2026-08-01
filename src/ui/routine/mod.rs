@@ -146,6 +146,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
         ui.painter().add(Shape::convex_polygon(vec![tip, top, bot], close_col, Stroke::NONE));
     }
     if close_r.clicked() { action = CloseAction::Close; }
+    if close_r.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
 
     let c = bar_rect.center();
     for x in [-6.0f32, 0.0, 6.0] {
@@ -195,9 +196,11 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
             };
             let resp = ui.add(
                 egui::Label::new(RichText::new(*label).color(color).size(12.0))
-                    .sense(Sense::click()),
+                    .sense(Sense::click())
+                    .selectable(false),
             );
             if resp.clicked() { state.tab = tab.clone(); }
+            if resp.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
             ui.add_space(gap);
         }
     });
