@@ -6,7 +6,7 @@ use super::BG;
 
 pub const SW: f32 = 300.0;
 
-pub const SH_GENERAL:  f32 = 200.0;
+pub const SH_GENERAL:  f32 = 226.0;
 pub const SH_PROJECTS: f32 = 160.0;
 pub const SH_SYNC:     f32 = 310.0;
 

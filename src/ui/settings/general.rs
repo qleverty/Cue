@@ -47,6 +47,14 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
         ui.label(RichText::new("Ставить на место главной задачи")
             .color(Color32::from_gray(190)).size(13.0));
     });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.checkbox(&mut settings.group_inactive_at_end, "").changed() { changed = true; }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Неактивные рутины — в конец списка")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
 
     if changed { settings.save(); }
 

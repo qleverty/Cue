@@ -353,7 +353,7 @@ impl App {
             // subs: флипаем active на месте, без перемещения по IndexMap —
             // order_key и физическая позиция задачи не меняются никогда при
             // активации. Группировка active/inactive для показа считается
-            // отдельно, на лету, при отрисовке (см. sub_texts в update()).
+            // отдельно, на лету, при отрисовке (см. display_order в update()).
             let mut changed = false;
             for task in proj.subs.values_mut() {
                 let Some(routine) = task.routine.as_mut() else { continue };
@@ -964,20 +964,39 @@ impl eframe::App for App {
         ui.add_space(6.0);
 
         // ── sub tasks ────────────────────────────────────────────────────
-        let sub_texts: Vec<String> = self.projects[self.active_project_idx]
-            .subs.values()
-            .map(|t| t.text.clone())
+        // Реальные индексы в subs, отсортированные под тумблер
+        // group_inactive_at_end. Физический порядок в IndexMap НЕ трогаем —
+        // это чисто display-time сортировка (см. обсуждение 2026-08-02).
+        // task_text/is_active идут рядом, чтобы не дёргать subs повторно
+        // в цикле отрисовки.
+        let proj_ref = &self.projects[self.active_project_idx];
+        let mut display_order: Vec<(usize, String, bool)> = proj_ref.subs.values()
+            .enumerate()
+            .map(|(real_i, t)| (real_i, t.text.clone(), project::is_active_task(t)))
             .collect();
+        if self.settings.group_inactive_at_end {
+            let order_keys: Vec<f64> = proj_ref.subs.values().map(|t| t.order_key).collect();
+            let created_ats: Vec<u64> = proj_ref.subs.values().map(|t| t.created_at).collect();
+            display_order.sort_by(|a, b| {
+                (!a.2).cmp(&!b.2)
+                    .then_with(|| order_keys[a.0].partial_cmp(&order_keys[b.0])
+                        .unwrap_or(std::cmp::Ordering::Equal))
+                    .then_with(|| created_ats[a.0].cmp(&created_ats[b.0]))
+            });
+        }
+        // иначе (тумблер выключен) — оставляем физический порядок как есть
 
-        if !sub_texts.is_empty() {
+        if !display_order.is_empty() {
             let (mut promote, mut delete, mut open_routine) = (None::<usize>, None::<usize>, None::<usize>);
 
-            let scroll_h = sub_texts.len().min(9) as f32 * (ROW - 5.0);
+            let scroll_h = display_order.len().min(9) as f32 * (ROW - 5.0);
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for (i, task_text) in sub_texts.iter().enumerate() {
+                    for (real_i, task_text, is_active) in display_order.iter() {
+                        let real_i    = *real_i;
+                        let is_active = *is_active;
                         ui.allocate_ui_with_layout(
                             vec2(self.w, ROW - 5.0),
                             Layout::right_to_left(Align::Center),
@@ -995,7 +1014,7 @@ impl eframe::App for App {
                                     uri: "bytes://cross.png".into(),
                                     bytes: CROSS_PNG.into(),
                                 }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
-                                if btn_resp.clicked() { delete = Some(i); }
+                                if btn_resp.clicked() { delete = Some(real_i); }
 
                                 ui.add_space(4.0);
                                 let (clk_rect, clk_resp) = ui.allocate_exact_size(
@@ -1010,24 +1029,33 @@ impl eframe::App for App {
                                     uri: "bytes://cross.png".into(),
                                     bytes: CROSS_PNG.into(),
                                 }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
-                                if clk_resp.clicked() { open_routine = Some(i); }
+                                if clk_resp.clicked() { open_routine = Some(real_i); }
 
                                 ui.add_space(6.0);
                                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                     ui.add_space(10.0);
+                                    // Неактивная рутина — тусклый текст, не кликабельна
+                                    // для promote (нельзя протолкнуть в main, пока не
+                                    // сработало расписание — см. обсуждение 2026-08-02).
+                                    let text_color = if is_active {
+                                        Color32::from_gray(200)
+                                    } else {
+                                        Color32::from_gray(55)
+                                    };
+                                    let sense = if is_active { Sense::click() } else { Sense::hover() };
                                     let label_r = ui.add(
                                         egui::Label::new(
                                             RichText::new(task_text.as_str())
-                                                .color(Color32::from_gray(200))
+                                                .color(text_color)
                                                 .size(13.0),
                                         )
                                         .truncate()
-                                        .sense(Sense::click()),
+                                        .sense(sense),
                                     );
-                                    if label_r.hovered() {
+                                    if is_active && label_r.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                     }
-                                    if label_r.clicked() { promote = Some(i); }
+                                    if is_active && label_r.clicked() { promote = Some(real_i); }
                                 });
                             },
                         );
