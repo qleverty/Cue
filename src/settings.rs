@@ -23,7 +23,6 @@ pub enum NewTaskPos {
 pub struct Settings {
     pub new_task_pos:     NewTaskPos,
     pub replace_main:     bool,
-    pub reset_on_startup: bool,
     #[serde(default)]
     pub last_project_id:  Option<String>,
     #[serde(default)]
@@ -37,7 +36,6 @@ impl Default for Settings {
         Self {
             new_task_pos:     NewTaskPos::End,
             replace_main:     false,
-            reset_on_startup: false,
             last_project_id:  None,
             last_width:       None,
             last_pos:         None,

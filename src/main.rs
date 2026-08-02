@@ -286,12 +286,6 @@ impl App {
             last_routine_tick:     0, // 0 → первый тик в update() сработает сразу
         };
 
-        if app.settings.reset_on_startup {
-            let idx = app.active_project_idx;
-            app.projects[idx].main.clear();
-            app.projects[idx].subs.clear();
-        }
-
         app
     }
 
@@ -325,7 +319,7 @@ impl App {
         } else if let Some(task) = proj.subs.get_mut(task_id.as_str()) {
             task.routine = routine;
         }
-        if !self.settings.reset_on_startup { self.projects[idx].save(); }
+        self.projects[idx].save();
     }
 
     /// Тик планировщика рутин — см. Cue_Routines_Implementation_Plan.txt,
@@ -503,7 +497,7 @@ impl eframe::App for App {
                             });
                             self.projects[idx].add_task(task_id, text, &s);
                         }
-                        if !self.settings.reset_on_startup { self.projects[idx].save(); }
+                        self.projects[idx].save();
                     }
                 }
             }
@@ -958,7 +952,7 @@ impl eframe::App for App {
                     });
                 }
                 self.projects[idx].complete_main(routine_scheduler::local_now());
-                if !self.settings.reset_on_startup { self.projects[idx].save(); }
+                self.projects[idx].save();
             }
             ui.add_space(8.0);
             let avail    = ui.available_rect_before_wrap();
@@ -1059,7 +1053,7 @@ impl eframe::App for App {
                     });
                 }
                 self.projects[idx].promote_sub(i);
-                if !self.settings.reset_on_startup { self.projects[idx].save(); }
+                self.projects[idx].save();
             }
             if let Some(i) = open_routine {
                 let idx = self.active_project_idx;
@@ -1084,7 +1078,7 @@ impl eframe::App for App {
                     self.sync.tombstones.add_task(&task_id, &project_id, ts, &self.sync.identity.device_id);
                 }
                 self.projects[idx].delete_sub(i);
-                if !self.settings.reset_on_startup { self.projects[idx].save(); }
+                self.projects[idx].save();
             }
         }
 
@@ -1126,7 +1120,7 @@ impl eframe::App for App {
                             target,
                         });
                         self.projects[idx].add_task(task_id, text, &s);
-                        if !s.reset_on_startup { self.projects[idx].save(); }
+                        self.projects[idx].save();
                     } else {
                         self.buf.clear();
                     }
