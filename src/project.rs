@@ -164,17 +164,6 @@ impl LoadedProject {
 
 
 
-    /// Индекс, на котором заканчивается группа "эффективно активных" задач
-    /// в subs (т.е. индекс первой неактивной рутины, либо subs.len(), если
-    /// неактивных нет). Новые АКТИВНЫЕ задачи нужно вставлять СЮДА (через
-    /// shift_insert), а не в физический конец IndexMap через insert() —
-    /// иначе они окажутся после неактивных рутин и сломают инвариант
-    /// "активные всегда перед неактивными" (см. раздел 2.5 плана).
-    pub(crate) fn active_group_end(&self) -> usize {
-        self.subs.iter().position(|(_, t)| !is_active_task(t))
-            .unwrap_or(self.subs.len())
-    }
-
     pub(crate) fn next_end_key(&self) -> f64 {
         self.subs.values().map(|t| t.order_key)
             .reduce(f64::max).map_or(0.0, |m| m + 1000.0)
@@ -202,8 +191,7 @@ impl LoadedProject {
             match s.new_task_pos {
                 NewTaskPos::End => {
                     old_task.order_key = self.next_end_key();
-                    let pos = self.active_group_end(); // старая main всегда активна
-                    self.subs.shift_insert(pos, old_id, old_task);
+                    self.subs.insert(old_id, old_task); // insert() = физический конец для новых ключей
                 }
                 NewTaskPos::Beginning => {
                     old_task.order_key = self.next_beg_key();
@@ -214,8 +202,7 @@ impl LoadedProject {
             match s.new_task_pos {
                 NewTaskPos::End => {
                     task.order_key = self.next_end_key();
-                    let pos = self.active_group_end(); // новая задача всегда активна
-                    self.subs.shift_insert(pos, id, task);
+                    self.subs.insert(id, task); // insert() = физический конец для новых ключей
                 }
                 NewTaskPos::Beginning => {
                     task.order_key = self.next_beg_key();
@@ -245,7 +232,7 @@ impl LoadedProject {
             if !exhausted {
                 routine.active = false;
                 task.order_key = self.next_end_key();
-                self.subs.insert(id, task);
+                self.subs.insert(id, task); // физический конец; display-порядок группирует отдельно
             }
             // если exhausted — задача просто никуда не возвращается (удалена
             // фактом невставки обратно, как обычная выполненная задача)
@@ -290,7 +277,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
             let text = std::fs::read_to_string(&path).ok()?;
             let file: ProjectFile = serde_json::from_str(&text).ok()?;
             let color = hex_to_color32(&file.color)?;
-            let mut proj = LoadedProject {
+            let proj = LoadedProject {
                 id,
                 name:       file.name,
                 color,
@@ -299,17 +286,10 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 subs:       file.tasks.subs,
                 created_at: file.created_at,
             };
-            // Две группы: сперва все эффективно активные (обычные задачи +
-            // рутины с active=true), затем неактивные рутины — внутри каждой
-            // группы порядок как раньше (order_key, затем created_at).
-            proj.subs.sort_by(|_, a, _, b| {
-                let ga = !is_active_task(a);
-                let gb = !is_active_task(b);
-                ga.cmp(&gb)
-                    .then_with(|| a.order_key.partial_cmp(&b.order_key)
-                        .unwrap_or(std::cmp::Ordering::Equal))
-                    .then_with(|| a.created_at.cmp(&b.created_at))
-            });
+            // Физический порядок subs больше не пересортировывается —
+            // хранится как в файле. Группировка active/inactive для показа
+            // (и её сортировка order_key/created_at внутри группы) считается
+            // на лету при отрисовке, см. main.rs.
             Some(proj)
         })
         .collect()

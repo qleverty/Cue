@@ -29,7 +29,16 @@ pub struct Settings {
     pub last_width:       Option<f32>,
     #[serde(default)]
     pub last_pos:         Option<[f32; 2]>,
+    /// Режим показа subs: true — неактивные рутины визуально едут в конец
+    /// списка (группировка active/inactive чисто display-time, физический
+    /// порядок в файле не трогается); false — "плоский" режим, порядок в UI
+    /// = физический порядок, неактивные просто тусклые на своём месте.
+    /// См. обсуждение 2026-08-02.
+    #[serde(default = "default_group_inactive")]
+    pub group_inactive_at_end: bool,
 }
+
+fn default_group_inactive() -> bool { true }
 
 impl Default for Settings {
     fn default() -> Self {
@@ -39,6 +48,7 @@ impl Default for Settings {
             last_project_id:  None,
             last_width:       None,
             last_pos:         None,
+            group_inactive_at_end: true,
         }
     }
 }

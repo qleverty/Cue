@@ -77,11 +77,7 @@ pub fn apply_op(
                 }
                 AddTarget::End => {
                     let mut t = task; t.order_key = proj.next_end_key();
-                    // новая задача всегда активна (routine: None) — вставляем
-                    // перед группой неактивных рутин, не в физический конец
-                    // (см. project.rs::active_group_end).
-                    let pos = proj.active_group_end();
-                    proj.subs.shift_insert(pos, task_id.clone(), t);
+                    proj.subs.insert(task_id.clone(), t); // физический конец
                 }
                 AddTarget::Beginning => {
                     let mut t = task; t.order_key = proj.next_beg_key();

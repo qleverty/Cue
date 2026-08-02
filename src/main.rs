@@ -350,29 +350,19 @@ impl App {
                 }
             }
 
-            // subs: сначала собрать id для флипа (без мутации порядка),
-            // потом вынуть/флипнуть/вставить перед группой неактивных —
-            // иначе только что активировавшаяся рутина осталась бы физически
-            // в хвосте "неактивной" зоны до следующей перезагрузки, ломая
-            // инвариант "активные впереди" (см. раздел 5.3 плана).
-            let to_flip: Vec<String> = proj.subs.iter()
-                .filter_map(|(id, t)| {
-                    let r = t.routine.as_ref()?;
-                    (!r.active && routine_scheduler::is_due(r, now)).then(|| id.clone())
-                })
-                .collect();
-
-            let changed = !to_flip.is_empty();
-            for id in to_flip {
-                let Some(idx) = proj.subs.get_index_of(&id) else { continue };
-                let (id, mut task) = proj.subs.shift_remove_index(idx).unwrap();
-                if let Some(routine) = task.routine.as_mut() {
+            // subs: флипаем active на месте, без перемещения по IndexMap —
+            // order_key и физическая позиция задачи не меняются никогда при
+            // активации. Группировка active/inactive для показа считается
+            // отдельно, на лету, при отрисовке (см. sub_texts в update()).
+            let mut changed = false;
+            for task in proj.subs.values_mut() {
+                let Some(routine) = task.routine.as_mut() else { continue };
+                if !routine.active && routine_scheduler::is_due(routine, now) {
                     routine.active = true;
                     routine.last_triggered_at = now;
+                    routine_scheduler::on_activated(&proj.name, &task.text);
+                    changed = true;
                 }
-                routine_scheduler::on_activated(&proj.name, &task.text);
-                let pos = proj.active_group_end();
-                proj.subs.shift_insert(pos, id, task);
             }
 
             if changed {
