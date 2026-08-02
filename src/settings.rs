@@ -155,7 +155,7 @@ pub fn draw_settings_ui(
 
     // ── tab bar ───────────────────────────────────────────────────────────────
 
-    ui.add_space(9.8);
+    ui.add_space(9.5);
     let tabs = [
         ("Основные",      SettingsTab::General),
         ("Проекты",       SettingsTab::Projects),
@@ -201,7 +201,7 @@ pub fn draw_settings_ui(
 
     ui.add_space(6.0);
     let y = ui.next_widget_position().y;
-    ui.painter().hline(14.0..=(SW - 14.0), y, (0.5, crate::SEP));
+    ui.painter().hline(0.0..=SW, y, (0.5, crate::SEP));
     ui.add_space(1.0);
 
     // ── tab content ───────────────────────────────────────────────────────────

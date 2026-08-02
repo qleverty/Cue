@@ -9,9 +9,9 @@ use crate::BG;
 
 pub const RW: f32 = 254.0;
 
-pub const RH_DIRECT: f32 = 200.0;
-pub const RH_WEEK:   f32 = 225.0;
-pub const RH_MONTH:  f32 = 285.0;
+pub const RH_DIRECT: f32 = 170.0;
+pub const RH_WEEK:   f32 = 195.0;
+pub const RH_MONTH:  f32 = 238.0;
 
 #[derive(PartialEq, Clone, Copy)]
 pub enum RoutineTab { Direct, Week, Month }
@@ -91,15 +91,7 @@ impl RoutineUiState {
         self.last_triggered_at = last_triggered_at;
         self.original           = routine.cloned();
 
-        // Какую вкладку показать при открытии: week -> month -> direct
-        // (первая непустая; UX по факту один тип на рутину за раз).
-        self.tab = if !week.is_empty() {
-            RoutineTab::Week
-        } else if !month.is_empty() {
-            RoutineTab::Month
-        } else {
-            RoutineTab::Direct
-        };
+        self.tab = RoutineTab::Direct;
     }
 
     /// Собирает Routine из текущего состояния вкладок + сохранённых
@@ -174,7 +166,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
         );
     }
 
-    ui.add_space(9.8);
+    ui.add_space(9.5);
     let tabs = [
         ("Дата",  RoutineTab::Direct),
         ("Неделя",  RoutineTab::Week),
@@ -219,7 +211,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     });
     ui.add_space(6.0);
     let y = ui.next_widget_position().y;
-    ui.painter().hline(14.0..=(RW - 14.0), y, (0.5, crate::SEP));
+    ui.painter().hline(0.0..=RW, y, (0.5, crate::SEP));
     ui.add_space(1.0);
 
     let list_h = ui.available_height() - 110.0 - 22.0; // pad + button
