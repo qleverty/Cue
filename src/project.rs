@@ -219,8 +219,10 @@ impl LoadedProject {
         let Some((id, mut task)) = self.main.shift_remove_index(0) else { return; };
 
         if let Some(routine) = task.routine.as_mut() {
-            // Чистка исчерпанных direct-записей — именно при ВЫПОЛНЕНИИ,
-            // не при активации (см. решение обсуждения).
+            // Чистка исчерпанных direct-записей. Основной вызов — уже при
+            // АКТИВАЦИИ (main.rs::routine_tick), здесь — идемпотентная
+            // подстраховка на случай, если что-то не почистилось раньше
+            // (например задачу вручную вставили в main без активации).
             crate::routine_scheduler::prune_expired_direct(routine, now);
 
             // Исчерпана целиком, только если это был "чистый" Direct
@@ -262,6 +264,37 @@ impl LoadedProject {
 
     pub fn delete_sub(&mut self, i: usize) {
         self.subs.shift_remove_index(i);
+    }
+
+    /// Досрочное завершение рутины прямо в subs (крестик по активной
+    /// рутине). В отличие от complete_main — никого никуда не двигаем и не
+    /// продвигаем: задача и так уже была в subs, просто гасим active.
+    /// Возвращает true, если что-то реально поменялось (был вызов не
+    /// на обычной задаче/уже неактивной — для них этот метод не должен
+    /// вызываться вовсе, но на всякий случай защищаемся).
+    pub fn complete_sub_routine(&mut self, i: usize, now: u64) -> bool {
+        let Some((id, task)) = self.subs.get_index(i) else { return false; };
+        if task.routine.is_none() { return false; }
+        let id = id.clone();
+
+        let routine = self.subs.get_mut(&id).unwrap().routine.as_mut().unwrap();
+        crate::routine_scheduler::prune_expired_direct(routine, now);
+        let exhausted = routine.week.is_none()
+            && routine.month.is_none()
+            && routine.direct.as_ref().map_or(true, |d| d.is_empty());
+
+        if exhausted {
+            // Полностью исчерпанная direct-рутина — удаляется целиком, как
+            // и в complete_main. Тумбстоун не нужен: результат детерминирован
+            // из уже синканных entries + ts, каждое устройство придёт к
+            // тому же выводу само (см. обсуждение 2026-08-02).
+            self.subs.shift_remove(&id);
+        } else {
+            // НЕ трогаем order_key и физическую позицию — задача остаётся
+            // ровно там же, просто гаснет.
+            self.subs.get_mut(&id).unwrap().routine.as_mut().unwrap().active = false;
+        }
+        true
     }
 }
 

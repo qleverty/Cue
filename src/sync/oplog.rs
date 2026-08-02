@@ -27,6 +27,11 @@ pub enum OpKind {
     DeleteTask     { project_id: String, task_id: String },
     #[serde(rename = "COMPLETE_MAIN")]
     CompleteMain   { project_id: String, task_id: String },
+    /// Досрочное завершение рутины прямо в subs (крестик по активной рутине
+    /// = "сделал без main"), без промоушена следующей задачи и без
+    /// перемещения по списку. См. обсуждение 2026-08-02.
+    #[serde(rename = "COMPLETE_SUB")]
+    CompleteSub    { project_id: String, task_id: String },
     #[serde(rename = "PROMOTE_TASK")]
     PromoteTask    { project_id: String, task_id: String },
     #[serde(rename = "EDIT_TASK")]
@@ -92,6 +97,7 @@ impl OpLog {
             OpKind::AddTask        { .. } => "ADD_TASK",
             OpKind::DeleteTask     { .. } => "DELETE_TASK",
             OpKind::CompleteMain   { .. } => "COMPLETE_MAIN",
+            OpKind::CompleteSub    { .. } => "COMPLETE_SUB",
             OpKind::PromoteTask    { .. } => "PROMOTE_TASK",
             OpKind::EditTask       { .. } => "EDIT_TASK",
             OpKind::SetRoutine     { .. } => "SET_ROUTINE",

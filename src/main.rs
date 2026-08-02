@@ -194,6 +194,11 @@ fn add_target_for(s: &settings::Settings, main_empty: bool) -> sync::oplog::AddT
     }
 }
 
+/// Цвет подчёркивания текста задач-рутин (в main и активных subs) — тот же,
+/// что у жёлтого индикатора в шапке окна редактора рутины
+/// (см. ui/routine/mod.rs:150). См. обсуждение 2026-08-02.
+const ROUTINE_UNDERLINE: Color32 = Color32::from_rgb(220, 180, 40);
+
 const PROJECT_PALETTE: &[Color32] = &[
     Color32::from_rgb(220,  50,  50), // red
     Color32::from_rgb(249, 115,  22), // orange
@@ -345,6 +350,7 @@ impl App {
                     if !routine.active && routine_scheduler::is_due(routine, now) {
                         routine.active = true;
                         routine.last_triggered_at = now;
+                        routine_scheduler::prune_expired_direct(routine, now);
                         routine_scheduler::on_activated(&proj.name, &task.text);
                     }
                 }
@@ -360,6 +366,7 @@ impl App {
                 if !routine.active && routine_scheduler::is_due(routine, now) {
                     routine.active = true;
                     routine.last_triggered_at = now;
+                    routine_scheduler::prune_expired_direct(routine, now);
                     routine_scheduler::on_activated(&proj.name, &task.text);
                     changed = true;
                 }
@@ -947,12 +954,22 @@ impl eframe::App for App {
             ui.add_space(8.0);
             let avail    = ui.available_rect_before_wrap();
             let text_str = self.projects[self.active_project_idx].main_text().unwrap_or("—");
-            let job = egui::text::LayoutJob::simple(
+            let mut job = egui::text::LayoutJob::simple(
                 text_str.to_owned(),
                 egui::FontId::proportional(15.0),
                 Color32::WHITE,
                 avail.width() - 10.0,
             );
+            // Жёлтое подчёркивание — если текущая main-задача является
+            // рутиной (независимо от active — в main рутина по определению
+            // уже активна, см. обсуждение 2026-08-02). Цвет — тот же, что
+            // у индикатора в шапке окна редактора рутины (см.
+            // ui/routine/mod.rs).
+            let main_is_routine = self.projects[self.active_project_idx].main
+                .values().next().map_or(false, |t| t.routine.is_some());
+            if main_is_routine {
+                job.sections[0].format.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
+            }
             let galley = ctx.fonts_mut(|f| f.layout_job(job));
             let pos = avail.min + vec2(10.0, (avail.height() - galley.size().y) / 2.0 - 1.0);
             ui.painter().galley(pos, galley, Color32::WHITE);
@@ -970,9 +987,9 @@ impl eframe::App for App {
         // task_text/is_active идут рядом, чтобы не дёргать subs повторно
         // в цикле отрисовки.
         let proj_ref = &self.projects[self.active_project_idx];
-        let mut display_order: Vec<(usize, String, bool)> = proj_ref.subs.values()
+        let mut display_order: Vec<(usize, String, bool, bool)> = proj_ref.subs.values()
             .enumerate()
-            .map(|(real_i, t)| (real_i, t.text.clone(), project::is_active_task(t)))
+            .map(|(real_i, t)| (real_i, t.text.clone(), project::is_active_task(t), t.routine.is_some()))
             .collect();
         if self.settings.group_inactive_at_end {
             let order_keys: Vec<f64> = proj_ref.subs.values().map(|t| t.order_key).collect();
@@ -994,9 +1011,10 @@ impl eframe::App for App {
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    for (real_i, task_text, is_active) in display_order.iter() {
-                        let real_i    = *real_i;
-                        let is_active = *is_active;
+                    for (real_i, task_text, is_active, has_routine) in display_order.iter() {
+                        let real_i      = *real_i;
+                        let is_active   = *is_active;
+                        let has_routine = *has_routine;
                         ui.allocate_ui_with_layout(
                             vec2(self.w, ROW - 5.0),
                             Layout::right_to_left(Align::Center),
@@ -1040,17 +1058,29 @@ impl eframe::App for App {
                                     let text_color = if is_active {
                                         Color32::from_gray(200)
                                     } else {
-                                        Color32::from_gray(55)
+                                        Color32::from_gray(90)
                                     };
                                     let sense = if is_active { Sense::click() } else { Sense::hover() };
+                                    // Подчёркивание — отдельный, независимый от text_color
+                                    // сигнал "это рутина", только у активных строк
+                                    // (тусклые/неактивные не подчёркиваем, см. обсуждение
+                                    // 2026-08-02). Через LayoutJob/TextFormat, а не
+                                    // RichText::underline() — иначе цвет линии слипается
+                                    // с цветом текста.
+                                    let mut fmt = egui::text::TextFormat {
+                                        font_id: egui::FontId::proportional(13.0),
+                                        color: text_color,
+                                        ..Default::default()
+                                    };
+                                    if has_routine && is_active {
+                                        fmt.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
+                                    }
+                                    let mut job = egui::text::LayoutJob::default();
+                                    job.append(task_text.as_str(), 0.0, fmt);
                                     let label_r = ui.add(
-                                        egui::Label::new(
-                                            RichText::new(task_text.as_str())
-                                                .color(text_color)
-                                                .size(13.0),
-                                        )
-                                        .truncate()
-                                        .sense(sense),
+                                        egui::Label::new(job)
+                                            .truncate()
+                                            .sense(sense),
                                     );
                                     if is_active && label_r.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
@@ -1086,16 +1116,35 @@ impl eframe::App for App {
                 ));
             }
             if let Some(i) = delete {
-                if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
-                    let task_id    = task_id.clone();
+                let is_active_routine = self.projects[idx].subs.get_index(i)
+                    .map(|(_, t)| t.routine.is_some() && project::is_active_task(t))
+                    .unwrap_or(false);
+
+                if is_active_routine {
+                    // Крестик по активной рутине = "сделал досрочно, без
+                    // main" — первый слой брони, не удаление. Задача не
+                    // двигается: остаётся ровно там же, физически.
+                    let task_id    = self.projects[idx].subs.get_index(i).unwrap().0.clone();
                     let project_id = self.projects[idx].id.clone();
                     let ts         = project::current_time();
-                    let _          = self.sync.record_op(sync::oplog::OpKind::DeleteTask {
-                        project_id: project_id.clone(), task_id: task_id.clone(),
+                    let _          = self.sync.record_op(sync::oplog::OpKind::CompleteSub {
+                        project_id, task_id,
                     });
-                    self.sync.tombstones.add_task(&task_id, &project_id, ts, &self.sync.identity.device_id);
+                    self.projects[idx].complete_sub_routine(i, ts);
+                } else {
+                    // Обычная задача, либо уже неактивная рутина — реальное
+                    // удаление, как раньше.
+                    if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
+                        let task_id    = task_id.clone();
+                        let project_id = self.projects[idx].id.clone();
+                        let ts         = project::current_time();
+                        let _          = self.sync.record_op(sync::oplog::OpKind::DeleteTask {
+                            project_id: project_id.clone(), task_id: task_id.clone(),
+                        });
+                        self.sync.tombstones.add_task(&task_id, &project_id, ts, &self.sync.identity.device_id);
+                    }
+                    self.projects[idx].delete_sub(i);
                 }
-                self.projects[idx].delete_sub(i);
                 self.projects[idx].save();
             }
         }

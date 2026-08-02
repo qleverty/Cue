@@ -105,6 +105,13 @@ pub fn apply_op(
             proj.complete_main(op.ts);
             Some(project_id.clone())
         }
+        OpKind::CompleteSub { project_id, task_id } => {
+            if tombstones.deleted_at(project_id).is_some() { return None; }
+            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
+            let idx = proj.subs.get_index_of(task_id.as_str())?;
+            proj.complete_sub_routine(idx, op.ts);
+            Some(project_id.clone())
+        }
         OpKind::SetRoutine { project_id, task_id, routine } => {
             if tombstones.deleted_at(project_id)
                 .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
