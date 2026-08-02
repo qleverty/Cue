@@ -947,9 +947,23 @@ impl eframe::App for App {
                         project_id: self.projects[idx].id.clone(),
                         task_id,
                     });
+                    self.projects[idx].complete_main(routine_scheduler::local_now());
+                    self.projects[idx].save();
+                } else if let Some(pos) = self.projects[idx].subs.iter()
+                    .position(|(_, t)| project::is_active_task(t))
+                {
+                    // main пуст (прочерк) — но есть свободная активная
+                    // задача/рутина в subs. Клик по прочерку теперь сам
+                    // проверяет это и продвигает её, вместо того чтобы
+                    // просто ничего не делать (см. обсуждение 2026-08-02).
+                    let task_id    = self.projects[idx].subs.get_index(pos).unwrap().0.clone();
+                    let project_id = self.projects[idx].id.clone();
+                    let _ = self.sync.record_op(sync::oplog::OpKind::PromoteTask {
+                        project_id, task_id,
+                    });
+                    self.projects[idx].promote_sub(pos);
+                    self.projects[idx].save();
                 }
-                self.projects[idx].complete_main(routine_scheduler::local_now());
-                self.projects[idx].save();
             }
             ui.add_space(8.0);
             let avail    = ui.available_rect_before_wrap();
