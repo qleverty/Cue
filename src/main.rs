@@ -6,6 +6,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 pub mod settings;
 pub mod project;
 pub mod routine_scheduler;
+pub mod notify;
 pub mod sync;
 pub mod ui;
 
@@ -44,7 +45,7 @@ pub const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
 static TICK_PNG:  &[u8] = include_bytes!("../pics/tick.png");
 pub static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
-static ICON_PNG:  &[u8] = include_bytes!("../icon.png");
+pub(crate) static ICON_PNG:  &[u8] = include_bytes!("../icon.png");
 
 // ── paths ─────────────────────────────────────────────────────────────────────
 
@@ -347,11 +348,16 @@ impl App {
             // без репозиционирования (main — всегда 0/1 элемент).
             for task in proj.main.values_mut() {
                 if let Some(routine) = task.routine.as_mut() {
-                    if !routine.active && routine_scheduler::is_due(routine, now) {
-                        routine.active = true;
-                        routine.last_triggered_at = now;
-                        routine_scheduler::prune_expired_direct(routine, now);
-                        routine_scheduler::on_activated(&proj.name, &task.text);
+                    if !routine.active {
+                        if let Some(occ) = routine_scheduler::due_occurrence(routine, now) {
+                            routine.active = true;
+                            routine.last_triggered_at = now;
+                            routine_scheduler::prune_expired_direct(routine, now);
+                            routine_scheduler::on_activated(&proj.name, &task.text);
+                            if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
+                                notify::send(&task.text, &proj.name);
+                            }
+                        }
                     }
                 }
             }
@@ -363,12 +369,17 @@ impl App {
             let mut changed = false;
             for task in proj.subs.values_mut() {
                 let Some(routine) = task.routine.as_mut() else { continue };
-                if !routine.active && routine_scheduler::is_due(routine, now) {
-                    routine.active = true;
-                    routine.last_triggered_at = now;
-                    routine_scheduler::prune_expired_direct(routine, now);
-                    routine_scheduler::on_activated(&proj.name, &task.text);
-                    changed = true;
+                if !routine.active {
+                    if let Some(occ) = routine_scheduler::due_occurrence(routine, now) {
+                        routine.active = true;
+                        routine.last_triggered_at = now;
+                        routine_scheduler::prune_expired_direct(routine, now);
+                        routine_scheduler::on_activated(&proj.name, &task.text);
+                        if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
+                            notify::send(&task.text, &proj.name);
+                        }
+                        changed = true;
+                    }
                 }
             }
 
