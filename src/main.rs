@@ -7,6 +7,7 @@ pub mod settings;
 pub mod project;
 pub mod routine_scheduler;
 pub mod notify;
+pub mod icon_cache;
 pub mod sync;
 pub mod ui;
 
@@ -249,6 +250,7 @@ impl App {
         cc.egui_ctx.set_visuals(vis);
 
         let _ = std::fs::create_dir_all(project::projects_dir());
+        icon_cache::load();
         let mut settings = settings::Settings::load();
         let mut projects = project::load_all_projects();
 
@@ -355,7 +357,7 @@ impl App {
                             routine_scheduler::prune_expired_direct(routine, now);
                             routine_scheduler::on_activated(&proj.name, &task.text);
                             if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
-                                notify::send(&task.text, &proj.name);
+                                notify::send(&task.text, &proj.name, &proj.color_hex);
                             }
                         }
                     }
@@ -376,7 +378,7 @@ impl App {
                         routine_scheduler::prune_expired_direct(routine, now);
                         routine_scheduler::on_activated(&proj.name, &task.text);
                         if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
-                            notify::send(&task.text, &proj.name);
+                            notify::send(&task.text, &proj.name, &proj.color_hex);
                         }
                         changed = true;
                     }
@@ -1329,6 +1331,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     );
 
+    icon_cache::persist();
     delete_lock();
     result
 }

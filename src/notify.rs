@@ -91,23 +91,6 @@ $toast    = New-Object Windows.UI.Notifications.ToastNotification($xml)
 $notifier.Show($toast)
 "#;
 
-    /// Путь к иконке-файлу для тоста (пишется на диск лениво, один раз за
-    /// процесс — toast требует реальный путь на диске, байтами из памяти
-    /// сослаться нельзя). Хранится рядом с проектами, в app_dir().
-    fn icon_path() -> &'static std::path::Path {
-        static PATH: OnceLock<std::path::PathBuf> = OnceLock::new();
-        PATH.get_or_init(|| {
-            let path = crate::app_dir().join("cue_icon.png");
-            if !path.exists() {
-                let _ = std::fs::create_dir_all(crate::app_dir());
-                if let Ok(mut f) = std::fs::File::create(&path) {
-                    let _ = f.write_all(crate::ICON_PNG);
-                }
-            }
-            path
-        })
-    }
-
     /// Путь к самому .ps1-скрипту (тоже пишется лениво, один раз за
     /// процесс — -File надёжнее квотинга через -Command с хвостовыми
     /// аргументами).
@@ -125,8 +108,8 @@ $notifier.Show($toast)
         })
     }
 
-    pub fn send(title: &str, body: &str) {
-        let icon = icon_path();
+    pub fn send(title: &str, body: &str, color_hex: &str) {
+        let icon = crate::icon_cache::icon_path_for(color_hex);
         let script = script_path();
 
         let result = Command::new("powershell")
@@ -136,7 +119,7 @@ $notifier.Show($toast)
             .arg("-AumId").arg(AUMID)
             .arg("-Title").arg(title)
             .arg("-Body").arg(body)
-            .arg("-IconPath").arg(icon)
+            .arg("-IconPath").arg(&icon)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
 
@@ -148,7 +131,7 @@ $notifier.Show($toast)
 
 #[cfg(not(windows))]
 mod imp {
-    pub fn send(_title: &str, _body: &str) {
+    pub fn send(_title: &str, _body: &str, _color_hex: &str) {
         // На остальных ОС уведомлений пока нет вовсе — рутина всё равно
         // активируется молча, как и раньше (см. обсуждение 2026-08-02).
     }
