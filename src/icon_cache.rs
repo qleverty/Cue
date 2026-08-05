@@ -69,14 +69,69 @@ fn generate(hex: &str) -> RgbaImage {
     let (base_img, mask) = base();
     let mut out = base_img.clone();
     if let Some(c) = crate::project::hex_to_color32(hex) {
+        let target = palette_rgb([c.r(), c.g(), c.b()]);
         for (px, &circle) in out.pixels_mut().zip(mask) {
             if circle {
                 let a = px.0[3];
-                *px = Rgba([c.r(), c.g(), c.b(), a]);
+                *px = Rgba([target[0], target[1], target[2], a]);
             }
         }
     }
     out
+}
+
+/// Подгоняет цвет проекта под "весовую категорию" эталонного кружка —
+/// иначе любой сколь угодно яркий/тёмный цвет из палитры выглядел бы
+/// рядом с логотипом чужеродно (см. обсуждение 2026-08-05).
+///
+/// t — цветность входного цвета (max-min канала, БЕЗ классической HSL-
+/// нормализации на светлоту: та формула нестабильна у краёв — например,
+/// едва розовый почти-белый получил бы t≈1, как чистый красный, из-за
+/// малого знаменателя). Из t как плавного коэффициента смешивания
+/// само вытекает и поведение чёрного/белого/серого — никакого порога
+/// или отдельной ветки не нужно: у них t сам стремится к нулю, и при
+/// нулевой цветности оттенок математически перестаёт что-либо решать.
+fn palette_rgb(c: [u8; 3]) -> [u8; 3] {
+    const L_MIN: f32 = 0.25;
+    const L_MAX: f32 = 0.75;
+
+    let (h, t, l_in)      = rgb_to_hcl(c);
+    let (_, c_ref, l_ref) = rgb_to_hcl([CIRCLE_REF[0] as u8, CIRCLE_REF[1] as u8, CIRCLE_REF[2] as u8]);
+
+    let chroma = c_ref * t;
+    let l = (l_ref * t + l_in * (1.0 - t)).clamp(L_MIN, L_MAX);
+    hcl_to_rgb(h, chroma, l)
+}
+
+/// RGB → (оттенок в градусах, цветность 0..1, светлота 0..1).
+fn rgb_to_hcl(c: [u8; 3]) -> (f32, f32, f32) {
+    let [r, g, b] = c.map(|v| v as f32 / 255.0);
+    let max = r.max(g).max(b);
+    let min = r.min(g).min(b);
+    let d = max - min;
+    if d == 0.0 { return (0.0, 0.0, (max + min) / 2.0); }
+    let h = 60.0 * if max == r {
+        ((g - b) / d).rem_euclid(6.0)
+    } else if max == g {
+        (b - r) / d + 2.0
+    } else {
+        (r - g) / d + 4.0
+    };
+    (h, d, (max + min) / 2.0)
+}
+
+fn hcl_to_rgb(h: f32, c: f32, l: f32) -> [u8; 3] {
+    let x = c * (1.0 - ((h / 60.0).rem_euclid(2.0) - 1.0).abs());
+    let m = l - c / 2.0;
+    let (r, g, b) = match h as u32 / 60 {
+        0 => (c, x, 0.0),
+        1 => (x, c, 0.0),
+        2 => (0.0, c, x),
+        3 => (0.0, x, c),
+        4 => (x, 0.0, c),
+        _ => (c, 0.0, x),
+    };
+    [r, g, b].map(|v| ((v + m) * 255.0).round().clamp(0.0, 255.0) as u8)
 }
 
 /// Путь к иконке под цвет проекта. Генерирует и кэширует на диске при
