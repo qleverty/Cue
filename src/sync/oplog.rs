@@ -29,7 +29,7 @@ pub enum OpKind {
     CompleteMain   { project_id: String, task_id: String },
     /// Досрочное завершение рутины прямо в subs (крестик по активной рутине
     /// = "сделал без main"), без промоушена следующей задачи и без
-    /// перемещения по списку. См. обсуждение 2026-08-02.
+    /// перемещения по списку.
     #[serde(rename = "COMPLETE_SUB")]
     CompleteSub    { project_id: String, task_id: String },
     #[serde(rename = "PROMOTE_TASK")]
@@ -37,8 +37,7 @@ pub enum OpKind {
     #[serde(rename = "EDIT_TASK")]
     EditTask       { project_id: String, task_id: String, text: String },
     /// Полная перезапись расписания задачи. `routine: None` — убрать
-    /// рутину целиком (задача остаётся обычной). Без диффов — см.
-    /// Cue_Routines_Implementation_Plan.txt, раздел 4.
+    /// рутину целиком (задача остаётся обычной). Без диффов.
     #[serde(rename = "SET_ROUTINE")]
     SetRoutine     { project_id: String, task_id: String, routine: Option<crate::project::Routine> },
     #[serde(rename = "SET_SHARED_SETTING")]
@@ -65,19 +64,16 @@ pub struct OpLog {
 }
 
 impl OpLog {
-    /// Open (or create) the log. Scans existing entries to find next_seq.
-    pub fn open(dir: &Path) -> Self {
+    /// Открыть (или создать) лог одним проходом по файлу: заодно возвращает
+    /// уже распарсенные операции — раньше `open()` и `all_ops()` читали и
+    /// парсили один и тот же файл дважды подряд при каждом старте.
+    pub fn open_with_ops(dir: &Path) -> (Self, Vec<Op>) {
         let path = dir.join("ops.ndjson");
-        let next_seq = std::fs::read_to_string(&path).ok()
-            .map(|s| {
-                s.lines()
-                    .filter_map(|l| serde_json::from_str::<Op>(l).ok())
-                    .map(|op| op.seq)
-                    .max()
-                    .map_or(1, |m| m + 1)
-            })
-            .unwrap_or(1);
-        Self { path, next_seq }
+        let ops: Vec<Op> = std::fs::read_to_string(&path).ok()
+            .map(|s| s.lines().filter_map(|l| serde_json::from_str(l).ok()).collect())
+            .unwrap_or_default();
+        let next_seq = ops.iter().map(|op| op.seq).max().map_or(1, |m| m + 1);
+        (Self { path, next_seq }, ops)
     }
 
     /// Append one op, auto-assigning seq. Returns the written Op.

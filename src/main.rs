@@ -198,7 +198,7 @@ fn add_target_for(s: &settings::Settings, main_empty: bool) -> sync::oplog::AddT
 
 /// Цвет подчёркивания текста задач-рутин (в main и активных subs) — тот же,
 /// что у жёлтого индикатора в шапке окна редактора рутины
-/// (см. ui/routine/mod.rs:150). См. обсуждение 2026-08-02.
+/// (см. ui/routine/mod.rs:150).
 const ROUTINE_UNDERLINE: Color32 = Color32::from_rgb(220, 180, 40);
 
 const PROJECT_PALETTE: &[Color32] = &[
@@ -241,7 +241,7 @@ struct App {
 }
 
 impl App {
-    fn new(cc: &eframe::CreationContext) -> Self {
+    fn new(cc: &eframe::CreationContext, mut settings: settings::Settings) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         let mut vis = egui::Visuals::dark();
         vis.panel_fill    = Color32::TRANSPARENT;
@@ -250,8 +250,10 @@ impl App {
         cc.egui_ctx.set_visuals(vis);
 
         let _ = std::fs::create_dir_all(project::projects_dir());
-        icon_cache::load();
-        let mut settings = settings::Settings::load();
+        std::thread::Builder::new()
+            .name("cue-routine".into())
+            .spawn(icon_cache::load)
+            .expect("spawn routine thread");
         let mut projects = project::load_all_projects();
 
         if projects.is_empty() {
@@ -968,7 +970,7 @@ impl eframe::App for App {
                     // main пуст (прочерк) — но есть свободная активная
                     // задача/рутина в subs. Клик по прочерку теперь сам
                     // проверяет это и продвигает её, вместо того чтобы
-                    // просто ничего не делать (см. обсуждение 2026-08-02).
+                    // просто ничего не делать.
                     let task_id    = self.projects[idx].subs.get_index(pos).unwrap().0.clone();
                     let project_id = self.projects[idx].id.clone();
                     let _ = self.sync.record_op(sync::oplog::OpKind::PromoteTask {
@@ -989,7 +991,7 @@ impl eframe::App for App {
             );
             // Жёлтое подчёркивание — если текущая main-задача является
             // рутиной (независимо от active — в main рутина по определению
-            // уже активна, см. обсуждение 2026-08-02). Цвет — тот же, что
+            // уже активна). Цвет — тот же, что
             // у индикатора в шапке окна редактора рутины (см.
             // ui/routine/mod.rs).
             let main_is_routine = self.projects[self.active_project_idx].main
@@ -1010,7 +1012,7 @@ impl eframe::App for App {
         // ── sub tasks ────────────────────────────────────────────────────
         // Реальные индексы в subs, отсортированные под тумблер
         // group_inactive_at_end. Физический порядок в IndexMap НЕ трогаем —
-        // это чисто display-time сортировка (см. обсуждение 2026-08-02).
+        // это чисто display-time сортировка.
         // task_text/is_active идут рядом, чтобы не дёргать subs повторно
         // в цикле отрисовки.
         let proj_ref = &self.projects[self.active_project_idx];
@@ -1081,7 +1083,7 @@ impl eframe::App for App {
                                     ui.add_space(10.0);
                                     // Неактивная рутина — тусклый текст, не кликабельна
                                     // для promote (нельзя протолкнуть в main, пока не
-                                    // сработало расписание — см. обсуждение 2026-08-02).
+                                    // сработало расписание).
                                     let text_color = if is_active {
                                         Color32::from_gray(200)
                                     } else {
@@ -1090,8 +1092,8 @@ impl eframe::App for App {
                                     let sense = if is_active { Sense::click() } else { Sense::hover() };
                                     // Подчёркивание — отдельный, независимый от text_color
                                     // сигнал "это рутина", только у активных строк
-                                    // (тусклые/неактивные не подчёркиваем, см. обсуждение
-                                    // 2026-08-02). Через LayoutJob/TextFormat, а не
+                                    // (тусклые/неактивные не подчёркиваем). Через
+                                    // LayoutJob/TextFormat, а не
                                     // RichText::underline() — иначе цвет линии слипается
                                     // с цветом текста.
                                     let mut fmt = egui::text::TextFormat {
@@ -1328,7 +1330,7 @@ fn main() -> eframe::Result<()> {
             viewport,
             ..Default::default()
         },
-        Box::new(|cc| Ok(Box::new(App::new(cc)))),
+        Box::new(move |cc| Ok(Box::new(App::new(cc, settings)))),
     );
 
     icon_cache::persist();

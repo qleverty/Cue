@@ -93,10 +93,10 @@ impl SyncHandle {
         crate::clog!("[sync] identity device_id={}", identity.device_id);
         let tombstones = tombstones::Tombstones::load(&dir);
         let cursors    = Arc::new(Mutex::new(cursors::Cursors::load(&dir)));
-        let mut oplog  = oplog::OpLog::open(&dir);
+        let (mut oplog, existing_ops) = oplog::OpLog::open_with_ops(&dir);
         crate::clog!("[sync] oplog opened, next_seq={}", oplog.next_seq);
 
-        let seen_ops: HashSet<String> = oplog.all_ops()
+        let seen_ops: HashSet<String> = existing_ops
             .into_iter().map(|op| op.op_id).collect();
         crate::clog!("[sync] seen_ops count={}", seen_ops.len());
 
