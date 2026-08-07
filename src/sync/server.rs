@@ -6,7 +6,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use tiny_http::{Method, Request, Response, Server, StatusCode};
 
-use super::{oplog::Op, peers::Peers};
+use super::{oplog::Op, peers::Peers, OplogState};
 
 pub const PORT:      u16 = 52684;
 pub const PROTO_VER: u32 = 1;
@@ -18,6 +18,11 @@ pub struct SharedState {
     pub device_name:      RwLock<String>,
     pub peers:            RwLock<Peers>,
     pub oplog_path:       PathBuf,
+    /// Loading/Ready state of the local oplog — see `OplogState` in `sync/mod.rs`.
+    /// `serve_ops` below deliberately does NOT go through this: it reads
+    /// `oplog_path` straight off disk, so answering peer pull requests never
+    /// has to wait on this regardless of Loading/Ready.
+    pub oplog_state:      Mutex<OplogState>,
     pub pending_pairings: Mutex<Vec<PairingRequest>>,
     pub sync_status:      Mutex<super::SyncStatus>,
     /// UDP discovery handle — exposes discovered list and ping trigger.

@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::TcpStream;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,10 +27,11 @@ pub fn start(
     cursors: Arc<Mutex<Cursors>>,
     ops_tx:  mpsc::Sender<Vec<Op>>,
     ping_rx: mpsc::Receiver<()>,
+    dir:     PathBuf,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("cue-sync-engine".into())
-        .spawn(move || run(state, cursors, ops_tx, ping_rx))
+        .spawn(move || run(state, cursors, ops_tx, ping_rx, dir))
         .expect("spawn sync engine thread")
 }
 
@@ -58,7 +60,14 @@ fn run(
     cursors: Arc<Mutex<Cursors>>,
     ops_tx:  mpsc::Sender<Vec<Op>>,
     ping_rx: mpsc::Receiver<()>,
+    dir:     PathBuf,
 ) {
+    // First thing, before the normal pull loop: if the main thread deferred
+    // loading ops.ndjson (non-empty file on startup — see SyncHandle::init),
+    // do that read here instead of blocking the UI thread with it. No-op if
+    // the file was already loaded synchronously (empty-file path).
+    super::ensure_oplog_ready(&dir, &state.oplog_state);
+
     loop {
         match ping_rx.recv_timeout(SYNC_INTERVAL) {
             Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {

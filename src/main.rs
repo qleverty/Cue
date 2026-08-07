@@ -275,7 +275,7 @@ impl App {
 
         let initial_w = settings.last_width.unwrap_or(W);
 
-        let mut app = Self {
+        let app = Self {
             settings,
             settings_ui:           settings::SettingsUiState::default(),
             routine_ui:            ui::routine::RoutineUiState::default(),
@@ -407,9 +407,22 @@ impl eframe::App for App {
         // рутины — успеть закоммитить его состояние перед выходом. Не
         // мешает крашу/убийству через диспетчер задач — там этот код просто
         // не успевает выполниться, что и требуется.
-        if ctx.input(|i| i.viewport().close_requested()) && matches!(self.screen, Screen::Routine) {
-            self.commit_routine_editor();
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if matches!(self.screen, Screen::Routine) {
+                self.commit_routine_editor();
+            }
+            // If the engine thread hasn't finished loading ops.ndjson yet,
+            // finish it right here so anything recorded in the meantime
+            // (including the SetRoutine commit right above, if any) actually
+            // makes it to disk before the process exits. No-op almost always —
+            // the engine thread has typically done this long before the user
+            // gets around to closing the window.
+            self.sync.flush_oplog_before_exit();
         }
+
+        // ── merge in historical op_ids once the background oplog load
+        // (if any) finishes — see OplogState/ensure_oplog_ready ─────────────
+        self.sync.poll_oplog_ready();
 
         // ── drain incoming sync ops (written by engine thread) ────────────
         {

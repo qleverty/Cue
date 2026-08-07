@@ -76,10 +76,18 @@ impl OpLog {
         (Self { path, next_seq }, ops)
     }
 
-    /// Append one op, auto-assigning seq. Returns the written Op.
+    /// Append one op, auto-assigning seq and op_id. Returns the written Op.
     pub fn append(&mut self, kind: OpKind, device_id: &str, ts: u64) -> std::io::Result<Op> {
+        self.append_op(crate::project::gen_id(), kind, device_id, ts)
+    }
+
+    /// Same as `append`, but takes a pre-generated `op_id`. Used to flush ops
+    /// that were queued (with their op_id already handed out for dedup)
+    /// while the oplog itself was still loading in the background — see
+    /// `OplogState` in `sync/mod.rs`.
+    pub fn append_op(&mut self, op_id: String, kind: OpKind, device_id: &str, ts: u64) -> std::io::Result<Op> {
         let op = Op {
-            op_id:     crate::project::gen_id(),
+            op_id,
             device_id: device_id.to_owned(),
             seq:       self.next_seq,
             ts,
