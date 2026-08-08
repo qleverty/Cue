@@ -307,6 +307,70 @@ impl LoadedProject {
     }
 }
 
+/// Синхронно читает и парсит ОДИН файл проекта по id. None — файл
+/// отсутствует, не читается, бьётся при парсинге, либо цвет невалиден.
+/// Тот же путь парсинга, что и в load_all_projects() — вынесен отдельно,
+/// чтобы переиспользовать и здесь, и при клике на непрогруженный проект
+/// (Этап 8 плана), и в фолбэке ниже.
+pub fn load_one(id: &str) -> Option<LoadedProject> {
+    let path = projects_dir().join(format!("{id}.json"));
+    let text = std::fs::read_to_string(&path).ok()?;
+    let file: ProjectFile = serde_json::from_str(&text).ok()?;
+    let color = hex_to_color32(&file.color)?;
+    Some(LoadedProject {
+        id: id.to_owned(),
+        name:       file.name,
+        color,
+        color_hex:  file.color,
+        main:       file.tasks.main,
+        subs:       file.tasks.subs,
+        created_at: file.created_at,
+    })
+}
+
+/// Синхронно загружает активный проект на старте, с фолбэком для
+/// битого/отсутствующего файла — см. Cue_Мёрж_Батча_И_Битые_Файлы.txt,
+/// "СЦЕНАРИЙ: АКТИВНЫЙ ПРОЕКТ БИТ/НЕДОСТУПЕН ИМЕННО НА СТАРТЕ".
+///
+/// ГОТОВО, НО ПОКА НИКЕМ НЕ ВЫЗЫВАЕТСЯ. Сегодня (полная синхронная
+/// загрузка, Этап 3) этот сценарий уже безобидно покрывается сам —
+/// load_all_projects() молча роняет битый файл, а резолвинг активного
+/// индекса в main.rs откатывается на index 0 (реальный, уже загруженный
+/// проект). Эта функция понадобится на Этапе 5 — в Ветке Б остальные
+/// проекты будут только заглушками (tasks: None), переключиться на
+/// "другой проект" при ошибке будет физически некуда, показывать нечего.
+///
+/// manifest.is_empty() решает между двумя ветками:
+///   - манифест НЕ пуст (другие проекты есть, но это заглушки) → если
+///     last_project_id не смог прочитаться — сразу дефолтный, БЕЗ
+///     каскада по другим id манифеста (риск: при системной порче диска
+///     цепочка попыток может затянуть старт на неопределённое время).
+///     Если last_project_id вообще не задан (None, не порча данных, а
+///     его отсутствие) — ОДНА попытка (без цепочки) на первый id из
+///     манифеста, и только если она тоже не удалась — дефолтный.
+///   - манифест пуст → тривиальный случай, просто пробуем
+///     last_project_id, иначе сразу дефолтный.
+pub fn load_active_with_fallback(
+    manifest: &crate::manifest::Manifest,
+    last_project_id: Option<&str>,
+) -> LoadedProject {
+    if !manifest.is_empty() {
+        if let Some(id) = last_project_id {
+            return load_one(id).unwrap_or_else(create_default_project);
+        }
+        if let Some(first_id) = manifest.keys().next() {
+            if let Some(p) = load_one(first_id) {
+                return p;
+            }
+        }
+        return create_default_project();
+    }
+
+    last_project_id
+        .and_then(load_one)
+        .unwrap_or_else(create_default_project)
+}
+
 pub fn load_all_projects() -> Vec<LoadedProject> {
     let Ok(entries) = std::fs::read_dir(projects_dir()) else { return vec![]; };
 
