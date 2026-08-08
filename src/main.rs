@@ -255,10 +255,40 @@ impl App {
             .name("cue-routine".into())
             .spawn(icon_cache::load)
             .expect("spawn routine thread");
+
+        // ── Этап 3: манифест + развилка (i)/(ii) ────────────────────────────
+        // Пока что ОБА условия ниже влияют только на то, нужно ли перестроить
+        // манифест — сама загрузка проектов остаётся полной и синхронной в
+        // любом случае (поток-загрузчик и настоящая "Ветка Б" появятся на
+        // Этапе 5). Смысл именно этого шага — обкатать развилку и миграцию
+        // отдельно от асинхронности. См. Cue_Старт_Приложения_План.txt, шаг 3.
+        let manifest = manifest::load();
+
+        // (i) Тот же самый дешёвый чек, что уже использует sync::SyncHandle::init
+        // (mod.rs:168) для решения "бутстрапить или нет". Дублируем его здесь,
+        // не меняя сигнатуру sync::init — см. обсуждение в плане, syscall дешевле
+        // правки интерфейса.
+        let ops_path       = app_dir().join("ops.ndjson");
+        let ops_ndjson_empty = std::fs::metadata(&ops_path).map(|m| m.len() == 0).unwrap_or(true);
+
+        // (ii) Манифеста нет вовсе, либо он есть, но пуст (например, юзер
+        // вручную удалил файл, или это первый запуск этой версии кода).
+        let manifest_missing_or_empty = manifest.is_empty();
+
+        clog!(
+            "[start] ops_ndjson_empty={} manifest_missing_or_empty={}",
+            ops_ndjson_empty, manifest_missing_or_empty
+        );
+
         let mut projects = project::load_all_projects();
 
         if projects.is_empty() {
             projects.push(project::create_default_project());
+        }
+
+        if manifest_missing_or_empty {
+            clog!("[start] manifest missing/empty — rebuilding from {} loaded projects", projects.len());
+            manifest::rebuild_from(&projects);
         }
 
         let sync = sync::SyncHandle::init(&mut projects, cc.egui_ctx.clone());
