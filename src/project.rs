@@ -160,6 +160,14 @@ impl LoadedProject {
                 let _ = std::fs::rename(&tmp, &path);
             }
         }
+        // Манифест — ПОСЛЕ файла проекта, всегда следующим шагом. Он может
+        // только отставать от истины (при краше между двумя записями), но
+        // никогда не должен опережать её. См. Cue_Мёрж_Батча_И_Битые_Файлы.txt.
+        crate::manifest::upsert_entry(&self.id, crate::manifest::ManifestEntry {
+            name:       self.name.clone(),
+            color_hex:  self.color_hex.clone(),
+            task_count: self.main.len() + self.subs.len(),
+        });
     }
 
 
@@ -176,6 +184,7 @@ impl LoadedProject {
     pub fn delete_file(&self) {
         let path = projects_dir().join(format!("{}.json", self.id));
         let _    = std::fs::remove_file(path);
+        crate::manifest::remove_entry(&self.id);
     }
 
     pub fn add_task(&mut self, id: String, text: String, s: &Settings) {
