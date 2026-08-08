@@ -5,6 +5,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod settings;
 pub mod project;
+pub mod manifest;
 pub mod routine_scheduler;
 pub mod notify;
 pub mod icon_cache;
