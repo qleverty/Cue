@@ -239,6 +239,10 @@ struct App {
     /// Момент последней проверки планировщика рутин (routine_scheduler::local_now()).
     /// См. Cue_Routines_Implementation_Plan.txt, Этап 5.
     last_routine_tick:     u64,
+    /// Some — Ветка Б холодного старта: ждём батч от потока-загрузчика
+    /// (весь список проектов с диска). None — Ветка А, поток ничего не
+    /// пришлёт, ждать нечего. Этап 6 (мёрж) читает и опустошает это поле.
+    project_loader_rx:     Option<std::sync::mpsc::Receiver<Vec<project::LoadedProject>>>,
 }
 
 impl App {
@@ -251,17 +255,9 @@ impl App {
         cc.egui_ctx.set_visuals(vis);
 
         let _ = std::fs::create_dir_all(project::projects_dir());
-        std::thread::Builder::new()
-            .name("cue-routine".into())
-            .spawn(icon_cache::load)
-            .expect("spawn routine thread");
 
-        // ── Этап 3: манифест + развилка (i)/(ii) ────────────────────────────
-        // Пока что ОБА условия ниже влияют только на то, нужно ли перестроить
-        // манифест — сама загрузка проектов остаётся полной и синхронной в
-        // любом случае (поток-загрузчик и настоящая "Ветка Б" появятся на
-        // Этапе 5). Смысл именно этого шага — обкатать развилку и миграцию
-        // отдельно от асинхронности. См. Cue_Старт_Приложения_План.txt, шаг 3.
+        // ── манифест + условия (i)/(ii) ─────────────────────────────────────
+        // См. Cue_Старт_Приложения_План.txt, шаг 3.
         let manifest = manifest::load();
 
         // (i) Тот же самый дешёвый чек, что уже использует sync::SyncHandle::init
@@ -275,31 +271,89 @@ impl App {
         // вручную удалил файл, или это первый запуск этой версии кода).
         let manifest_missing_or_empty = manifest.is_empty();
 
-        clog!(
-            "[start] ops_ndjson_empty={} manifest_missing_or_empty={}",
-            ops_ndjson_empty, manifest_missing_or_empty
-        );
+        // Любое из двух условий → полная синхронная загрузка (Ветка А).
+        // Оба ложны (обычный случай, повседневная работа) → Ветка Б —
+        // манифестные заглушки + один активный проект синхронно, остальное
+        // едет отдельным потоком.
+        let full_sync_load = ops_ndjson_empty || manifest_missing_or_empty;
 
-        let mut projects = project::load_all_projects();
+        let (project_batch_tx, project_batch_rx) =
+            std::sync::mpsc::channel::<Vec<project::LoadedProject>>();
 
-        if projects.is_empty() {
-            projects.push(project::create_default_project());
+        let mut projects: Vec<project::LoadedProject>;
+        let active_idx: usize;
+        let project_loader_rx: Option<std::sync::mpsc::Receiver<Vec<project::LoadedProject>>>;
+
+        if full_sync_load {
+            clog!(
+                "[start] Ветка А (full sync load) — ops_ndjson_empty={} manifest_missing_or_empty={}",
+                ops_ndjson_empty, manifest_missing_or_empty
+            );
+            let mut loaded = project::load_all_projects();
+            if loaded.is_empty() {
+                loaded.push(project::create_default_project());
+            }
+            if manifest_missing_or_empty {
+                clog!("[start] manifest missing/empty — rebuilding from {} loaded projects", loaded.len());
+                manifest::rebuild_from(&loaded);
+            }
+
+            let last_id = settings.last_project_id.clone();
+            active_idx = last_id.as_deref()
+                .and_then(|id| loaded.iter().position(|p| p.id == id))
+                .unwrap_or(0);
+            projects         = loaded;
+            project_loader_rx = None; // поток ничего не пришлёт — see need_load_projects ниже
+        } else {
+            clog!("[start] Ветка Б (partial load) — манифест содержит {} проектов", manifest.len());
+            let last_id = settings.last_project_id.clone();
+            let active  = project::load_active_with_fallback(&manifest, last_id.as_deref());
+            let active_id = active.id.clone();
+
+            let mut built: Vec<project::LoadedProject> = manifest.iter()
+                .filter(|(id, _)| id.as_str() != active_id.as_str())
+                .map(|(id, entry)| {
+                    let color = project::hex_to_color32(&entry.color_hex)
+                        .unwrap_or(Color32::from_rgb(74, 144, 217));
+                    project::LoadedProject {
+                        id:         id.clone(),
+                        name:       entry.name.clone(),
+                        color,
+                        color_hex:  entry.color_hex.clone(),
+                        main:       indexmap::IndexMap::new(),
+                        subs:       indexmap::IndexMap::new(),
+                        created_at: 0, // временная заглушка — см. project.rs, load_active_with_fallback
+                        loaded:     false,
+                    }
+                })
+                .collect();
+            built.push(active);
+            active_idx = built.len() - 1; // именно что вставили последним — активный, реальный
+
+            projects          = built;
+            project_loader_rx = Some(project_batch_rx);
         }
 
-        if manifest_missing_or_empty {
-            clog!("[start] manifest missing/empty — rebuilding from {} loaded projects", projects.len());
-            manifest::rebuild_from(&projects);
-        }
+        // Поток "cue-routine": иконки — всегда; полное чтение всех файлов
+        // проектов — только если Ветка Б (Ветка А уже загрузила всё сама
+        // синхронно, повторное чтение было бы работой без цели). Флаг и tx
+        // захватываются в move-замыкании по значению, вычислены выше.
+        let need_load_projects = !full_sync_load;
+        std::thread::Builder::new()
+            .name("cue-routine".into())
+            .spawn(move || {
+                icon_cache::load();
+                if need_load_projects {
+                    let all = project::load_all_projects();
+                    let _   = project_batch_tx.send(all);
+                }
+            })
+            .expect("spawn routine thread");
 
         let sync = sync::SyncHandle::init(&mut projects, cc.egui_ctx.clone());
 
-        let last_id    = settings.last_project_id.clone();
-        let active_idx = last_id.as_deref()
-            .and_then(|id| projects.iter().position(|p| p.id == id))
-            .unwrap_or(0);
-
         let actual_id = projects[active_idx].id.clone();
-        if last_id.as_deref() != Some(&actual_id) {
+        if settings.last_project_id.as_deref() != Some(&actual_id) {
             settings.last_project_id = Some(actual_id);
             settings.save();
         }
@@ -325,6 +379,7 @@ impl App {
             project_need_focus:    false,
             project_new_color_idx: 0,
             last_routine_tick:     0, // 0 → первый тик в update() сработает сразу
+            project_loader_rx,
         };
 
         app

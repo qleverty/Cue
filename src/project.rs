@@ -124,6 +124,13 @@ pub struct LoadedProject {
     pub subs:       IndexMap<String, TaskData>,
     pub color_hex:  String,
     pub created_at: u64,
+    /// true — реальные данные с диска. false — манифестная заглушка
+    /// (Ветка Б холодного старта, main.rs), main/subs пока пусты не
+    /// потому что проект пуст, а потому что его ещё не прочитали.
+    /// Этап 6 (мёрж батча от потока-загрузчика) использует это поле,
+    /// чтобы решить — доверять батчу целиком (false) или скипнуть
+    /// (true, уже реальные данные).
+    pub loaded:     bool,
 }
 
 impl LoadedProject {
@@ -134,6 +141,7 @@ impl LoadedProject {
             main:       IndexMap::new(),
             subs:       IndexMap::new(),
             created_at,
+            loaded:     true,
         }
     }
 
@@ -325,6 +333,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
         main:       file.tasks.main,
         subs:       file.tasks.subs,
         created_at: file.created_at,
+        loaded:     true,
     })
 }
 
@@ -391,6 +400,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 main:       file.tasks.main,
                 subs:       file.tasks.subs,
                 created_at: file.created_at,
+                loaded:     true,
             };
             // Физический порядок subs больше не пересортировывается —
             // хранится как в файле. Группировка active/inactive для показа
