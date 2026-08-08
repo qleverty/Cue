@@ -541,6 +541,56 @@ impl eframe::App for App {
                 self.settings.save();
             }
         }
+        // ── drain project-loader batch (Ветка Б холодного старта) ──────────
+        // Поток-загрузчик, если он был запущен (project_loader_rx == Some),
+        // шлёт РОВНО ОДИН батч и завершается — не цикл, один try_recv() в
+        // кадр достаточно, в отличие от ops_rx выше. Правило мёржа — см.
+        // Cue_Мёрж_Батча_И_Битые_Файлы.txt.
+        //
+        // ИЗВЕСТНЫЙ ОТКРЫТЫЙ РИСК (закроется Этапом 7, ещё не сделан): если
+        // юзер (или синхронный DeleteProject от пира, см. блок ops_rx выше)
+        // удалит проект-заглушку ПОСЛЕ старта, но ДО прихода этого батча —
+        // ветка "не найден → вставить" ниже его воскресит. Временный
+        // HashSet<deleted_id> для защиты от этого — отдельный, следующий шаг.
+        if let Some(rx) = self.project_loader_rx.take() {
+            match rx.try_recv() {
+                Ok(batch) => {
+                    for incoming in batch {
+                        match self.projects.iter().position(|p| p.id == incoming.id) {
+                            Some(idx) if self.projects[idx].loaded => {
+                                // Уже есть живые данные — полный скип, не
+                                // трогаем ничего из батча для этого id.
+                            }
+                            Some(idx) => {
+                                // Была заглушка (loaded: false) — полное
+                                // доверие батчу целиком.
+                                self.projects[idx] = incoming;
+                            }
+                            None => {
+                                // Не было даже заглушки в манифесте —
+                                // доверяем батчу целиком.
+                                self.projects.push(incoming);
+                            }
+                        }
+                    }
+                    ctx.request_repaint();
+                    // project_loader_rx уже None (взяли через .take() выше) —
+                    // канал больше не понадобится, поток своё дело сделал.
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // Поток ещё не дочитал диск — вернуть receiver на место,
+                    // попробовать снова в следующем кадре.
+                    self.project_loader_rx = Some(rx);
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    // Поток упал/запаниковал, ничего не прислав. Не блокируем
+                    // программу навсегда — просто оставляем заглушки
+                    // заглушками (тот же исход, что и "битый файл" при клике,
+                    // Этап 8, только сразу для всех разом, а не по одному).
+                }
+            }
+        }
+
         // Fallback: wake egui periodically in case no sync activity.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
