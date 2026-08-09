@@ -298,10 +298,12 @@ impl App {
             if loaded.is_empty() {
                 loaded.push(project::create_default_project());
             }
-            if manifest_missing_or_empty {
-                clog!("[start] manifest missing/empty — rebuilding from {} loaded projects", loaded.len());
-                manifest::rebuild_from(&loaded);
-            }
+            // Всегда, не только когда manifest_missing_or_empty — все проекты
+            // и так честно загружены в память в этот момент, лишнего чтения
+            // диска это не добавляет, а закрывает случай "манифест не пуст,
+            // но с дырой/лишней записью" (не только полностью пустой).
+            clog!("[start] rebuilding manifest from {} loaded projects", loaded.len());
+            manifest::rebuild_from(&loaded);
 
             let last_id = settings.last_project_id.clone();
             active_idx = last_id.as_deref()
@@ -391,8 +393,43 @@ impl App {
         app
     }
 
+    /// Переключает активный проект. Если целевой проект — ещё заглушка
+    /// (loaded: false, Ветка Б холодного старта, батч ещё не подъехал) —
+    /// синхронно, на месте клика, пытается дочитать именно этот один файл.
+    /// См. Cue_Мёрж_Батча_И_Битые_Файлы.txt, "СЦЕНАРИЙ: КЛИК НА ПРОЕКТ,
+    /// КОТОРОГО ЕЩЁ НЕТ В self.projects С ЗАГРУЖЕННЫМИ ЗАДАЧАМИ".
     fn switch_to_project(&mut self, idx: usize) {
         if idx == self.active_project_idx { return; }
+
+        if !self.projects[idx].loaded {
+            match project::load_one(&self.projects[idx].id) {
+                Some(real) => {
+                    self.projects[idx] = real;
+                }
+                None => {
+                    // Любая ошибка чтения — файл битый/недоступен/лок.
+                    // Фантомно убрать из ОЗУ: НЕ логируем как удаление, НЕ
+                    // вызываем delete_file(), НЕ шлём DeleteProject op —
+                    // юзер ничего не просил удалять, файл может просто
+                    // временно быть недоступен (например пир как раз
+                    // дописывает его через sync).
+                    clog!("[switch] project {} unreadable — removing phantom placeholder", self.projects[idx].id);
+                    self.projects.remove(idx);
+                    if idx < self.active_project_idx {
+                        self.active_project_idx -= 1;
+                    }
+                    if self.projects.is_empty() {
+                        self.projects.push(project::create_default_project());
+                        self.active_project_idx = 0;
+                    }
+                    self.settings.last_project_id =
+                        Some(self.projects[self.active_project_idx].id.clone());
+                    self.settings.save();
+                    return; // idx-проекта больше нет — переключение на него отменено
+                }
+            }
+        }
+
         self.active_project_idx = idx;
         self.settings.last_project_id = Some(self.projects[idx].id.clone());
         self.settings.save();
@@ -589,6 +626,13 @@ impl eframe::App for App {
                     // нужен: project_loader_rx уже None (взяли через .take()
                     // выше), новых батчей не будет, воскрешать больше нечему.
                     self.deleted_during_load.clear();
+                    // Перестроить манифест из self.projects БЕЗУСЛОВНО, один
+                    // раз (это разовое, не per-frame событие — сам приход
+                    // батча случается ровно один раз за запуск). Закрывает
+                    // случай, когда id вернулся в self.projects через push
+                    // выше (ветка None), в обход save()/upsert_entry — иначе
+                    // манифест на диске так и остался бы не знать о нём.
+                    manifest::rebuild_from(&self.projects);
                     ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
