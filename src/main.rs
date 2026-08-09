@@ -243,6 +243,11 @@ struct App {
     /// (весь список проектов с диска). None — Ветка А, поток ничего не
     /// пришлёт, ждать нечего. Этап 6 (мёрж) читает и опустошает это поле.
     project_loader_rx:     Option<std::sync::mpsc::Receiver<Vec<project::LoadedProject>>>,
+    /// Временный список id, удалённых (локально или синхронно от пира)
+    /// ПОКА ещё ждём батч от потока-загрузчика — чтобы мёрж-блок ниже не
+    /// воскресил их обратно. Наполняется только пока project_loader_rx —
+    /// Some; очищается сразу после успешного мёржа батча (окно закрылось).
+    deleted_during_load:    std::collections::HashSet<String>,
 }
 
 impl App {
@@ -380,6 +385,7 @@ impl App {
             project_new_color_idx: 0,
             last_routine_tick:     0, // 0 → первый тик в update() сработает сразу
             project_loader_rx,
+            deleted_during_load:   std::collections::HashSet::new(),
         };
 
         app
@@ -516,6 +522,11 @@ impl eframe::App for App {
                 std::collections::HashSet::new();
             while let Ok(ops) = self.sync.ops_rx.try_recv() {
                 for op in ops {
+                    if self.project_loader_rx.is_some() {
+                        if let sync::oplog::OpKind::DeleteProject { project_id } = &op.kind {
+                            self.deleted_during_load.insert(project_id.clone());
+                        }
+                    }
                     if let Some(pid) = sync::apply::apply_op(
                         &op, &mut self.projects,
                         &mut self.sync.tombstones,
@@ -546,16 +557,17 @@ impl eframe::App for App {
         // шлёт РОВНО ОДИН батч и завершается — не цикл, один try_recv() в
         // кадр достаточно, в отличие от ops_rx выше. Правило мёржа — см.
         // Cue_Мёрж_Батча_И_Битые_Файлы.txt.
-        //
-        // ИЗВЕСТНЫЙ ОТКРЫТЫЙ РИСК (закроется Этапом 7, ещё не сделан): если
-        // юзер (или синхронный DeleteProject от пира, см. блок ops_rx выше)
-        // удалит проект-заглушку ПОСЛЕ старта, но ДО прихода этого батча —
-        // ветка "не найден → вставить" ниже его воскресит. Временный
-        // HashSet<deleted_id> для защиты от этого — отдельный, следующий шаг.
         if let Some(rx) = self.project_loader_rx.take() {
             match rx.try_recv() {
                 Ok(batch) => {
                     for incoming in batch {
+                        // Этап 7: фильтр ДО матча по self.projects — если id
+                        // был удалён (локально или синхронно от пира) пока мы
+                        // ждали этот батч, не воскрешаем его. Один проход,
+                        // без промежуточного "вставили → удалили".
+                        if self.deleted_during_load.contains(&incoming.id) {
+                            continue;
+                        }
                         match self.projects.iter().position(|p| p.id == incoming.id) {
                             Some(idx) if self.projects[idx].loaded => {
                                 // Уже есть живые данные — полный скип, не
@@ -573,9 +585,11 @@ impl eframe::App for App {
                             }
                         }
                     }
+                    // Окно закрылось — сет своё дело сделал, дальше он не
+                    // нужен: project_loader_rx уже None (взяли через .take()
+                    // выше), новых батчей не будет, воскрешать больше нечему.
+                    self.deleted_during_load.clear();
                     ctx.request_repaint();
-                    // project_loader_rx уже None (взяли через .take() выше) —
-                    // канал больше не понадобится, поток своё дело сделал.
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
                     // Поток ещё не дочитал диск — вернуть receiver на место,
@@ -1042,6 +1056,9 @@ impl eframe::App for App {
                     if confirm_delete(&name) {
                         let project_id = self.projects[i].id.clone();
                         let ts         = project::current_time();
+                        if self.project_loader_rx.is_some() {
+                            self.deleted_during_load.insert(project_id.clone());
+                        }
                         let _          = self.sync.record_op(sync::oplog::OpKind::DeleteProject {
                             project_id: project_id.clone(),
                         });
