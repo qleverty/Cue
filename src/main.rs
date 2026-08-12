@@ -564,6 +564,43 @@ impl eframe::App for App {
                             self.deleted_during_load.insert(project_id.clone());
                         }
                     }
+
+                    // Узкий фикс: если оп касается проекта, который у нас
+                    // всё ещё манифестная заглушка (loaded: false, Ветка Б
+                    // холодного старта) — синхронно догрузить его ПЕРЕД
+                    // apply_op. Иначе apply_op честно нашёл бы проект в
+                    // self.projects и замутировал бы пустые main/subs
+                    // заглушки как будто это настоящий пустой проект — а
+                    // последующий save() затёр бы реальный файл на диске,
+                    // потеряв всё, что там было. Если чтение не удалось
+                    // (файл реально битый, не просто "ещё не загружен") —
+                    // фантомно убираем заглушку (тот же путь, что и в
+                    // switch_to_project при клике) и НЕ применяем оп —
+                    // ровно то же самое, что случилось бы, если бы проекта
+                    // не было в self.projects вовсе.
+                    if let Some(pid) = op.kind.project_id() {
+                        if let Some(idx) = self.projects.iter().position(|p| p.id == pid) {
+                            if !self.projects[idx].loaded {
+                                match project::load_one(pid) {
+                                    Some(real) => {
+                                        self.projects[idx] = real;
+                                    }
+                                    None => {
+                                        self.projects.remove(idx);
+                                        if idx < self.active_project_idx {
+                                            self.active_project_idx -= 1;
+                                        }
+                                        if self.projects.is_empty() {
+                                            self.projects.push(project::create_default_project());
+                                            self.active_project_idx = 0;
+                                        }
+                                        continue; // проекта больше нет — этот оп не применяем
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(pid) = sync::apply::apply_op(
                         &op, &mut self.projects,
                         &mut self.sync.tombstones,

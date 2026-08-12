@@ -44,6 +44,31 @@ pub enum OpKind {
     SetSharedSetting { key: String, value: serde_json::Value },
 }
 
+impl OpKind {
+    /// project_id этого опа, если он вообще про конкретный проект.
+    /// None — только для SetSharedSetting (глобальная настройка, не
+    /// привязана к проекту). Используется в main.rs перед apply_op, чтобы
+    /// узнать, чей проект нужно (при необходимости) синхронно догрузить —
+    /// см. "узкий фикс" в обсуждении: заглушка (loaded: false) не должна
+    /// получать оп поверх пустых main/subs.
+    pub fn project_id(&self) -> Option<&str> {
+        match self {
+            OpKind::CreateProject  { project_id, .. } => Some(project_id),
+            OpKind::DeleteProject  { project_id }     => Some(project_id),
+            OpKind::RenameProject  { project_id, .. } => Some(project_id),
+            OpKind::RecolorProject { project_id, .. } => Some(project_id),
+            OpKind::AddTask        { project_id, .. } => Some(project_id),
+            OpKind::DeleteTask     { project_id, .. } => Some(project_id),
+            OpKind::CompleteMain   { project_id, .. } => Some(project_id),
+            OpKind::CompleteSub    { project_id, .. } => Some(project_id),
+            OpKind::PromoteTask    { project_id, .. } => Some(project_id),
+            OpKind::EditTask       { project_id, .. } => Some(project_id),
+            OpKind::SetRoutine     { project_id, .. } => Some(project_id),
+            OpKind::SetSharedSetting { .. }           => None,
+        }
+    }
+}
+
 /// One record in ops.ndjson.
 /// `flatten` on `kind` merges "op"/"payload" into the top-level object.
 #[derive(Serialize, Deserialize, Clone)]
