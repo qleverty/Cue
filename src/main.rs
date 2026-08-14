@@ -95,7 +95,7 @@ fn delete_lock() { let _ = std::fs::remove_file(lock_path()); }
 fn lock_is_fresh(l: &LockData) -> bool {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-    now.saturating_sub(l.time) < 86400
+    now.saturating_sub(l.time) < 3600
 }
 
 #[cfg(target_os = "windows")]
@@ -239,6 +239,10 @@ struct App {
     /// Момент последней проверки планировщика рутин (routine_scheduler::local_now()).
     /// См. Cue_Routines_Implementation_Plan.txt, Этап 5.
     last_routine_tick:     u64,
+    /// Момент последнего обновления cue.lock (см. write_lock()) — обновляется
+    /// периодически, пока Cue жива, чтобы демон мог отличить реально
+    /// работающую Cue от давно рухнувшей сессии с тем же PID.
+    last_lock_refresh:     u64,
     /// Some — Ветка Б холодного старта: ждём батч от потока-загрузчика
     /// (весь список проектов с диска). None — Ветка А, поток ничего не
     /// пришлёт, ждать нечего. Этап 6 (мёрж) читает и опустошает это поле.
@@ -386,6 +390,7 @@ impl App {
             project_need_focus:    false,
             project_new_color_idx: 0,
             last_routine_tick:     0, // 0 → первый тик в update() сработает сразу
+            last_lock_refresh:     0, // 0 → первое обновление лока в update() сработает сразу
             project_loader_rx,
             deleted_during_load:   std::collections::HashSet::new(),
         };
@@ -466,12 +471,16 @@ impl App {
     /// (ui() и так гарантированно зовётся минимум раз в секунду благодаря
     /// ctx.request_repaint_after(1 сек) выше).
     fn routine_tick(&mut self) {
-        // Маленький интервал для ручного тестирования Этапа 5 — после
-        // подтверждения, что механизм работает, стоит увеличить до 60
-        // (раз в минуту, как в исходном design-доке).
         const TICK_INTERVAL_SECS: u64 = 5;
+        const LOCK_REFRESH_INTERVAL_SECS: u64 = 15 * 60;
 
         let now = routine_scheduler::local_now();
+
+        if now >= self.last_lock_refresh + LOCK_REFRESH_INTERVAL_SECS {
+            self.last_lock_refresh = now;
+            write_lock();
+        }
+
         if now < self.last_routine_tick + TICK_INTERVAL_SECS { return; }
         self.last_routine_tick = now;
 

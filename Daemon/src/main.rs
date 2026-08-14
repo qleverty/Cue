@@ -30,7 +30,7 @@ pub fn app_dir() -> std::path::PathBuf {
     }
 }
 
-const TICK_INTERVAL_SECS: u64 = 30;
+const TICK_INTERVAL_SECS: u64 = 60;
 
 fn tick(projects: &mut [project::LoadedProject]) {
     if cue_liveness::cue_is_running() {

@@ -16,7 +16,7 @@ fn lock_is_fresh(l: &LockData) -> bool {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    now.saturating_sub(l.time) < 86400
+    now.saturating_sub(l.time) < 3600
 }
 
 #[cfg(target_os = "windows")]

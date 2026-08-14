@@ -151,7 +151,7 @@ fn direct_entry_secs(entry: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * 86400 + h as i64 * 3600 + mi as i64 * 60)
 }
 
-pub const NOTIFY_WINDOW_SECS: u64 = 60;
+pub const NOTIFY_WINDOW_SECS: u64 = 120;
 
 pub fn due_occurrence(routine: &Routine, now: u64) -> Option<u64> {
     let candidates = [
