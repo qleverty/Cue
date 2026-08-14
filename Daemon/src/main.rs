@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod cue_liveness;
 mod icon_cache;
 mod notify;
 mod project;
@@ -29,12 +30,19 @@ pub fn app_dir() -> std::path::PathBuf {
     }
 }
 
-const TICK_INTERVAL_SECS: u64 = 5;
+const TICK_INTERVAL_SECS: u64 = 30;
 
 fn tick(projects: &mut [project::LoadedProject]) {
+    if cue_liveness::cue_is_running() {
+        println!("[cue_daemon] Cue жива, пропускаю тик");
+        return;
+    }
+
     let now = routine_scheduler::local_now();
 
     for p in projects.iter_mut() {
+        let mut changed = false;
+
         for (id, task) in p.main.iter_mut().chain(p.subs.iter_mut()) {
             let Some(routine) = task.routine.as_mut() else { continue };
             if routine.active { continue }
@@ -43,6 +51,7 @@ fn tick(projects: &mut [project::LoadedProject]) {
             routine.active = true;
             routine.last_triggered_at = now;
             routine_scheduler::prune_expired_direct(routine, now);
+            changed = true;
 
             println!(
                 "  ACTIVATED: [{}] {} — задача '{}' (task_id={id}), occ={occ}",
@@ -52,6 +61,11 @@ fn tick(projects: &mut [project::LoadedProject]) {
             if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
                 notify::send(&task.text, &p.name, &p.color_hex);
             }
+        }
+
+        if changed {
+            p.save(now);
+            println!("[cue_daemon] сохранён проект {} ({})", p.name, p.id);
         }
     }
 }

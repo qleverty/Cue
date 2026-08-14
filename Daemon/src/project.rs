@@ -56,6 +56,25 @@ pub struct LoadedProject {
     pub created_at: u64,
 }
 
+impl LoadedProject {
+    pub fn save(&self, now: u64) {
+        let file = ProjectFile {
+            ver: 1,
+            name: self.name.clone(),
+            color: self.color_hex.clone(),
+            tasks: TasksFile { main: self.main.clone(), subs: self.subs.clone() },
+            last_edited: now,
+            created_at: self.created_at,
+        };
+        let Ok(json) = serde_json::to_string_pretty(&file) else { return };
+        let path = projects_dir().join(format!("{}.json", self.id));
+        let tmp  = projects_dir().join(format!("{}.json.tmp", self.id));
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    }
+}
+
 pub fn load_all_projects() -> Vec<LoadedProject> {
     let Ok(entries) = std::fs::read_dir(projects_dir()) else { return vec![]; };
 
