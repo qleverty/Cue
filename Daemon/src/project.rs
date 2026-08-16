@@ -72,6 +72,12 @@ impl LoadedProject {
         if std::fs::write(&tmp, json).is_ok() {
             let _ = std::fs::rename(&tmp, &path);
         }
+
+        crate::manifest::upsert_entry(&self.id, crate::manifest::ManifestEntry {
+            name:       self.name.clone(),
+            color_hex:  self.color_hex.clone(),
+            task_count: self.main.len() + self.subs.len(),
+        });
     }
 }
 
