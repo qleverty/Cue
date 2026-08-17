@@ -24,16 +24,19 @@ fn run() {
             .unwrap_or(false);
 
         if req.method() == &Method::Get && path == "/1/control" && query.contains("cmd=yield") {
-            if is_loopback {
-                println!("[cue_daemon] получен yield от {:?}", req.remote_addr());
-            } else {
+            if !is_loopback {
                 println!("[cue_daemon] отклонён yield не с loopback: {:?}", req.remote_addr());
                 let _ = req.respond(Response::from_string("").with_status_code(StatusCode(403)));
                 continue;
             }
+
+            println!("[cue_daemon] получен yield от {:?}, отпускаю порт", req.remote_addr());
             let _ = req.respond(Response::from_string("").with_status_code(StatusCode(200)));
+            server.unblock();
         } else {
             let _ = req.respond(Response::from_string("").with_status_code(StatusCode(404)));
         }
     }
+
+    println!("[cue_daemon] control-сервер отпустил порт {PORT}, поток завершён");
 }
