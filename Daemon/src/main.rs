@@ -3,6 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod control_server;
 mod cue_liveness;
+mod exclusive_bind;
 mod icon_cache;
 mod manifest;
 mod notify;

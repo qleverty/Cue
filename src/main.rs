@@ -9,6 +9,7 @@ pub mod manifest;
 pub mod routine_scheduler;
 pub mod notify;
 pub mod icon_cache;
+pub mod exclusive_bind;
 pub mod sync;
 pub mod ui;
 

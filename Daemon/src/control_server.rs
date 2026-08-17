@@ -1,5 +1,7 @@
 use tiny_http::{Method, Response, Server, StatusCode};
 
+use crate::exclusive_bind::bind_exclusive;
+
 pub const PORT: u16 = 52684;
 
 pub fn start() {
@@ -9,23 +11,27 @@ pub fn start() {
         .expect("spawn control server thread");
 }
 
-const BIND_RETRY_MS: u64 = 300;
+const BIND_RETRY_MS:       u64 = 300;
+const RELEASE_COOLDOWN_MS: u64 = 1000;
 
 fn run() {
     loop {
         let server = bind_with_retry();
         println!("[cue_daemon] control-сервер слушает порт {PORT}");
         serve(&server);
-        println!("[cue_daemon] control-сервер отпустил порт {PORT}, пробую вернуть");
+        println!("[cue_daemon] control-сервер отпустил порт {PORT}, жду {RELEASE_COOLDOWN_MS}мс перед повтором");
+        std::thread::sleep(std::time::Duration::from_millis(RELEASE_COOLDOWN_MS));
     }
 }
 
 fn bind_with_retry() -> Server {
     let mut logged_wait = false;
     loop {
-        match Server::http(format!("0.0.0.0:{PORT}")) {
-            Ok(server) => return server,
-            Err(_) => {
+        let attempt = bind_exclusive(PORT).ok()
+            .and_then(|l| Server::from_listener(l, None).ok());
+        match attempt {
+            Some(server) => return server,
+            None => {
                 if !logged_wait {
                     println!("[cue_daemon] порт {PORT} занят, жду освобождения");
                     logged_wait = true;
