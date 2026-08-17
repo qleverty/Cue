@@ -19,6 +19,7 @@ fn run() {
         let server = bind_with_retry();
         println!("[cue_daemon] control-сервер слушает порт {PORT}");
         serve(&server);
+        drop(server);
         println!("[cue_daemon] control-сервер отпустил порт {PORT}, жду {RELEASE_COOLDOWN_MS}мс перед повтором");
         std::thread::sleep(std::time::Duration::from_millis(RELEASE_COOLDOWN_MS));
     }
