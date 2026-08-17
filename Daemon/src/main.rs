@@ -1,6 +1,7 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod control_server;
 mod cue_liveness;
 mod icon_cache;
 mod manifest;
@@ -73,6 +74,8 @@ fn tick(projects: &mut [project::LoadedProject]) {
 
 fn main() {
     println!("[cue_daemon] запущен, pid={}", std::process::id());
+
+    control_server::start();
 
     let mut projects = project::load_all_projects();
     println!("[cue_daemon] прочитано проектов: {}", projects.len());

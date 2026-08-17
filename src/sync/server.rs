@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 use serde::{Deserialize, Serialize};
@@ -43,20 +46,51 @@ pub struct PairingRequest {
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
+const BIND_RETRY_MS:    u64 = 300;
+const YIELD_RESEND_MS:  u64 = 3000;
+const YIELD_TIMEOUT_MS: u64 = 250;
+
 pub fn start(state: Arc<SharedState>) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("cue-sync-server".into())
         .spawn(move || {
-            match Server::http(format!("0.0.0.0:{PORT}")) {
-                Ok(server) => {
-                    for req in server.incoming_requests() {
-                        handle(req, &state);
-                    }
-                }
-                Err(e) => crate::clog!("[sync/server] bind failed on port {PORT}: {e}"),
+            let server = bind_with_retry();
+            for req in server.incoming_requests() {
+                handle(req, &state);
             }
         })
         .expect("spawn sync server thread")
+}
+
+fn bind_with_retry() -> Server {
+    let mut last_yield_sent = Instant::now() - Duration::from_millis(YIELD_RESEND_MS);
+    loop {
+        match Server::http(format!("0.0.0.0:{PORT}")) {
+            Ok(server) => return server,
+            Err(e) => {
+                crate::clog!("[sync/server] bind failed on port {PORT}: {e}");
+                if last_yield_sent.elapsed() >= Duration::from_millis(YIELD_RESEND_MS) {
+                    send_yield();
+                    last_yield_sent = Instant::now();
+                }
+                std::thread::sleep(Duration::from_millis(BIND_RETRY_MS));
+            }
+        }
+    }
+}
+
+fn send_yield() {
+    let addr = match format!("127.0.0.1:{PORT}").parse() {
+        Ok(a)  => a,
+        Err(_) => return,
+    };
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(YIELD_TIMEOUT_MS)) else {
+        return;
+    };
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(YIELD_TIMEOUT_MS)));
+    let _ = stream.write_all(
+        b"GET /1/control?cmd=yield HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"
+    );
 }
 
 // ── request dispatch ─────────────────────────────────────────────────────────
