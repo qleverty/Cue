@@ -9,13 +9,34 @@ pub fn start() {
         .expect("spawn control server thread");
 }
 
-fn run() {
-    let server = match Server::http(format!("0.0.0.0:{PORT}")) {
-        Ok(s)  => s,
-        Err(e) => { println!("[cue_daemon] не удалось забиндить порт {PORT}: {e}"); return; }
-    };
-    println!("[cue_daemon] control-сервер слушает порт {PORT}");
+const BIND_RETRY_MS: u64 = 300;
 
+fn run() {
+    loop {
+        let server = bind_with_retry();
+        println!("[cue_daemon] control-сервер слушает порт {PORT}");
+        serve(&server);
+        println!("[cue_daemon] control-сервер отпустил порт {PORT}, пробую вернуть");
+    }
+}
+
+fn bind_with_retry() -> Server {
+    let mut logged_wait = false;
+    loop {
+        match Server::http(format!("0.0.0.0:{PORT}")) {
+            Ok(server) => return server,
+            Err(_) => {
+                if !logged_wait {
+                    println!("[cue_daemon] порт {PORT} занят, жду освобождения");
+                    logged_wait = true;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(BIND_RETRY_MS));
+            }
+        }
+    }
+}
+
+fn serve(server: &Server) {
     for req in server.incoming_requests() {
         let raw = req.url().to_owned();
         let (path, query) = raw.split_once('?').unwrap_or((&raw, ""));
@@ -37,6 +58,4 @@ fn run() {
             let _ = req.respond(Response::from_string("").with_status_code(StatusCode(404)));
         }
     }
-
-    println!("[cue_daemon] control-сервер отпустил порт {PORT}, поток завершён");
 }
