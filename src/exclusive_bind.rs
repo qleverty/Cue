@@ -11,7 +11,7 @@ pub mod imp {
     const SOCK_STREAM:         i32 = 1;
     const IPPROTO_TCP:         i32 = 6;
     const SOL_SOCKET:          i32 = 0xffff;
-    const SO_EXCLUSIVEADDRUSE: i32 = -5; // ~SO_REUSEADDR (SO_REUSEADDR = 0x0004)
+    const SO_EXCLUSIVEADDRUSE: i32 = -5;
 
     #[repr(C)]
     struct WsaData {
@@ -43,12 +43,6 @@ pub mod imp {
         fn htons(x: u16) -> u16;
     }
 
-    /// Биндит TCP-порт с флагом SO_EXCLUSIVEADDRUSE — без него Windows,
-    /// в отличие от Linux, позволяет двум разным процессам успешно
-    /// забиндиться на один и тот же порт одновременно (см. MS-доку про
-    /// SO_REUSEADDR/SO_EXCLUSIVEADDRUSE), из-за чего входящие соединения
-    /// начинают недетерминированно доставаться то одному, то другому —
-    /// ровно то, что ломало проверку владения портом.
     pub fn bind_exclusive(port: u16) -> io::Result<TcpListener> {
         unsafe {
             let mut wsa: WsaData = std::mem::zeroed();
@@ -92,9 +86,6 @@ pub mod imp {
     use std::io;
     use std::net::TcpListener;
 
-    // На Linux/macOS bind() для listening-сокета уже эксклюзивен по
-    // умолчанию (в отличие от Windows) — второй bind на тот же порт
-    // без явного SO_REUSEPORT просто падает с AddrInUse, что нам и нужно.
     pub fn bind_exclusive(port: u16) -> io::Result<TcpListener> {
         TcpListener::bind(("0.0.0.0", port))
     }
