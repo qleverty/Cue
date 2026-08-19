@@ -12,7 +12,7 @@ pub fn start() {
 }
 
 const BIND_RETRY_MS:       u64 = 300;
-const RELEASE_COOLDOWN_MS: u64 = 1000;
+const RELEASE_COOLDOWN_MS: u64 = 5000;
 
 fn run() {
     loop {
