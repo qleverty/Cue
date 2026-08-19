@@ -134,6 +134,10 @@ pub struct LoadedProject {
 }
 
 impl LoadedProject {
+    pub fn has_active_routine(&self) -> bool {
+        self.main.values().chain(self.subs.values())
+            .any(|t| t.routine.as_ref().is_some_and(|r| r.active))
+    }
     pub fn new(id: String, name: String, color: Color32, created_at: u64) -> Self {
         Self {
             color_hex: color32_to_hex(color),
@@ -172,9 +176,10 @@ impl LoadedProject {
         // только отставать от истины (при краше между двумя записями), но
         // никогда не должен опережать её. См. Cue_Мёрж_Батча_И_Битые_Файлы.txt.
         crate::manifest::upsert_entry(&self.id, crate::manifest::ManifestEntry {
-            name:       self.name.clone(),
-            color_hex:  self.color_hex.clone(),
-            task_count: self.main.len() + self.subs.len(),
+            name:               self.name.clone(),
+            color_hex:          self.color_hex.clone(),
+            task_count:         self.main.len() + self.subs.len(),
+            has_active_routine: self.has_active_routine(),
         });
     }
 

@@ -57,6 +57,11 @@ pub struct LoadedProject {
 }
 
 impl LoadedProject {
+    pub fn has_active_routine(&self) -> bool {
+        self.main.values().chain(self.subs.values())
+            .any(|t| t.routine.as_ref().is_some_and(|r| r.active))
+    }
+
     pub fn save(&self, now: u64) {
         let file = ProjectFile {
             ver: 1,
@@ -74,9 +79,10 @@ impl LoadedProject {
         }
 
         crate::manifest::upsert_entry(&self.id, crate::manifest::ManifestEntry {
-            name:       self.name.clone(),
-            color_hex:  self.color_hex.clone(),
-            task_count: self.main.len() + self.subs.len(),
+            name:               self.name.clone(),
+            color_hex:          self.color_hex.clone(),
+            task_count:         self.main.len() + self.subs.len(),
+            has_active_routine: self.has_active_routine(),
         });
     }
 }

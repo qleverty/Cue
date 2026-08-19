@@ -17,9 +17,10 @@ use std::collections::HashMap;
 
 #[derive(Serialize, Deserialize, Clone, PartialEq)]
 pub struct ManifestEntry {
-    pub name:       String,
-    pub color_hex:  String,
-    pub task_count: usize,
+    pub name:               String,
+    pub color_hex:          String,
+    pub task_count:         usize,
+    pub has_active_routine: bool,
 }
 
 /// id проекта → его запись в манифесте.
@@ -85,9 +86,10 @@ pub fn rebuild_from(projects: &[crate::project::LoadedProject]) {
     let m: Manifest = projects.iter().map(|p| {
         let task_count = p.main.len() + p.subs.len();
         (p.id.clone(), ManifestEntry {
-            name:       p.name.clone(),
-            color_hex:  p.color_hex.clone(),
+            name:               p.name.clone(),
+            color_hex:          p.color_hex.clone(),
             task_count,
+            has_active_routine: p.has_active_routine(),
         })
     }).collect();
     write_whole(&m);
