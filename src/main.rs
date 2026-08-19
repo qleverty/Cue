@@ -286,6 +286,10 @@ struct App {
     editing_task:            Option<usize>,
     edit_buf:                String,
     edit_need_focus:         bool,
+    /// real_i перетаскиваемой (drag & drop) sub-задачи. Пока Some — весь
+    /// список залочен точно так же, как при редактировании (list_locked),
+    /// а строка-источник рисуется как невидимый плейсхолдер.
+    dragging_task:           Option<usize>,
 }
 
 impl App {
@@ -430,6 +434,7 @@ impl App {
             editing_task:          None,
             edit_buf:              String::new(),
             edit_need_focus:       false,
+            dragging_task:         None,
         };
 
         app
@@ -1234,6 +1239,20 @@ impl eframe::App for App {
         }
 
         // ── main task ────────────────────────────────────────────────────
+        // Y-координата разделителя main/subs нужна ЗАРАНЕЕ (до отрисовки
+        // main), чтобы понять, где сейчас курсор при перетаскивании (выше
+        // разделителя — "готовим promote", ниже — "готовим вставку в
+        // subs"), и подменить текст main-задачи превью перетаскиваемой.
+        // main_h — уже известная фиксированная высота main-блока, поэтому
+        // divider_y можно посчитать до, а не после его отрисовки.
+        let divider_y = ui.next_widget_position().y + main_h;
+        let drag_pointer = if self.dragging_task.is_some() {
+            ctx.input(|i| i.pointer.interact_pos())
+        } else {
+            None
+        };
+        let dragging_above_divider = drag_pointer.map_or(false, |p| p.y < divider_y);
+
         ui.allocate_ui_with_layout(vec2(self.w, main_h), Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(8.0);
             let (btn_alloc, _) = ui.allocate_exact_size(vec2(25.0, 25.0), Sense::hover());
@@ -1274,22 +1293,41 @@ impl eframe::App for App {
                 }
             }
             ui.add_space(8.0);
-            let avail    = ui.available_rect_before_wrap();
-            let text_str = self.projects[self.active_project_idx].main_text().unwrap_or("—");
+            let avail = ui.available_rect_before_wrap();
+            // Пока задачу тащат выше разделителя — вместо обычного текста
+            // main показываем ПРЕВЬЮ: текст перетаскиваемой задачи (и её
+            // routine-статус — для подчёркивания ниже), как будет выглядеть
+            // после promote при отпускании именно здесь.
+            let dragged_preview: Option<(String, bool)> = if dragging_above_divider {
+                self.dragging_task.and_then(|i| {
+                    self.projects[self.active_project_idx].subs.get_index(i)
+                        .map(|(_, t)| (t.text.clone(), t.routine.is_some()))
+                })
+            } else {
+                None
+            };
+            let text_str: &str = match &dragged_preview {
+                Some((t, _)) => t.as_str(),
+                None => self.projects[self.active_project_idx].main_text().unwrap_or("—"),
+            };
+            // Превью печатается тем же максимально белым цветом, что и
+            // обычный main-текст — никакой прозрачности (раньше была,
+            // убрали по просьбе).
             let mut job = egui::text::LayoutJob::simple(
                 text_str.to_owned(),
                 egui::FontId::proportional(15.0),
                 Color32::WHITE,
                 avail.width() - 10.0,
             );
-            // Жёлтое подчёркивание — если текущая main-задача является
-            // рутиной (независимо от active — в main рутина по определению
-            // уже активна). Цвет — тот же, что
-            // у индикатора в шапке окна редактора рутины (см.
-            // ui/routine/mod.rs).
-            let main_is_routine = self.projects[self.active_project_idx].main
-                .values().next().map_or(false, |t| t.routine.is_some());
-            if main_is_routine {
+            // Жёлтое подчёркивание — если задача является рутиной. Либо
+            // текущая main-задача (обычный режим), либо перетаскиваемая
+            // задача в preview-режиме (её будущий статус после promote).
+            let is_routine = match &dragged_preview {
+                Some((_, has_routine)) => *has_routine,
+                None => self.projects[self.active_project_idx].main
+                    .values().next().map_or(false, |t| t.routine.is_some()),
+            };
+            if is_routine {
                 job.sections[0].format.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
             }
             let galley = ctx.fonts_mut(|f| f.layout_job(job));
@@ -1298,8 +1336,7 @@ impl eframe::App for App {
             ui.allocate_exact_size(avail.size(), Sense::hover());
         });
 
-        let y = ui.next_widget_position().y;
-        ui.painter().hline(0.0..=self.w, y, (0.5, SEP));
+        ui.painter().hline(0.0..=self.w, divider_y, (0.5, SEP));
         ui.add_space(6.0);
 
         // ── sub tasks ────────────────────────────────────────────────────
@@ -1333,12 +1370,17 @@ impl eframe::App for App {
         if !display_order.is_empty() {
             let (mut promote, mut delete, mut open_routine) = (None::<usize>, None::<usize>, None::<usize>);
             let (mut commit_edit, mut cancel_edit) = (false, false);
-            // Пока какая-то задача редактируется — весь список залочен для
-            // остальных кнопок (см. решение выше: не даём кликать по чужим
-            // крестикам/routine/карандашу, пока идёт правка).
-            let list_locked = self.editing_task.is_some();
+            // Пока какая-то задача редактируется ИЛИ перетаскивается — весь
+            // список залочен для остальных кнопок (не даём кликать по
+            // чужим крестикам/routine/карандашу/тексту, пока идёт правка
+            // или drag).
+            let list_locked = self.editing_task.is_some() || self.dragging_task.is_some();
 
             let scroll_h = display_order.len().min(9) as f32 * (ROW - 5.0);
+            // Реальные экранные прямоугольники строк (в display-порядке) —
+            // нужны после цикла, чтобы по Y координате курсора найти щель
+            // под белую полоску-индикатор и вычислить target для reorder_sub.
+            let mut row_rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(display_order.len());
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
@@ -1348,6 +1390,7 @@ impl eframe::App for App {
                         let is_active   = *is_active;
                         let has_routine = *has_routine;
                         let is_editing  = self.editing_task == Some(real_i);
+                        let is_dragged_row = self.dragging_task == Some(real_i);
 
                         // Прямоугольник ВСЕЙ строки — вычисляем до отрисовки, чтобы
                         // без лага в кадр знать, наведён ли курсор именно на строку
@@ -1369,7 +1412,7 @@ impl eframe::App for App {
                         // красными предупреждениями egui. push_id(real_i, ...) солит
                         // все Id внутри строки стабильным индексом задачи и полностью
                         // убирает возможность коллизии.
-                        ui.push_id(real_i, |ui| {
+                        let row_resp = ui.push_id(real_i, |ui| {
                         ui.allocate_ui_with_layout(
                             vec2(self.w, ROW - 5.0),
                             Layout::right_to_left(Align::Center),
@@ -1425,56 +1468,57 @@ impl eframe::App for App {
                                     // у ScrollArea), иначе разное число виджетов
                                     // между passes/кадрами сбивает автогенерируемые
                                     // Id ("Widget rect changed id between passes").
-                                    // Появление/исчезновение — только через ПЛАВНОЕ
-                                    // изменение размера/отступа (t) и альфы тинта,
-                                    // а не наличие/отсутствие ui.put — количество
-                                    // вызовов остаётся неизменным на любом pass'е.
-                                    let anim_id = ui.id().with("btns_anim");
-                                    let t = ctx.animate_bool_with_time(anim_id, show_buttons, 0.15);
-
-                                    ui.add_space(7.0 * t);
+                                    // Видимость регулируем ТОЛЬКО прозрачностью
+                                    // тинта, а не наличием/отсутствием ui.put.
+                                    ui.add_space(7.0);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
-                                        vec2(15.0 * t, 15.0), Sense::click());
-                                    let cross_tint = if btn_resp.hovered() && show_buttons {
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let cross_tint = if !show_buttons {
+                                        Color32::TRANSPARENT
+                                    } else if btn_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::from_white_alpha((255.0 * t) as u8)
+                                        Color32::WHITE
                                     } else {
-                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
+                                        Color32::from_gray(130)
                                     };
                                     ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://cross.png".into(),
                                         bytes: CROSS_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(cross_tint));
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
                                     if show_buttons && btn_resp.clicked() { delete = Some(real_i); }
 
-                                    ui.add_space(4.0 * t);
+                                    ui.add_space(4.0);
                                     let (clk_rect, clk_resp) = ui.allocate_exact_size(
-                                        vec2(15.0 * t, 15.0), Sense::click());
-                                    let clk_tint = if clk_resp.hovered() && show_buttons {
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let clk_tint = if !show_buttons {
+                                        Color32::TRANSPARENT
+                                    } else if clk_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::from_white_alpha((255.0 * t) as u8)
+                                        Color32::WHITE
                                     } else {
-                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
+                                        Color32::from_gray(130)
                                     };
                                     ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://clock.png".into(),
                                         bytes: CLOCK_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(clk_tint));
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
                                     if show_buttons && clk_resp.clicked() { open_routine = Some(real_i); }
 
-                                    ui.add_space(4.0 * t);
+                                    ui.add_space(4.0);
                                     let (pen_rect, pen_resp) = ui.allocate_exact_size(
-                                        vec2(15.0 * t, 15.0), Sense::click());
-                                    let pen_tint = if pen_resp.hovered() && show_buttons {
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let pen_tint = if !show_buttons {
+                                        Color32::TRANSPARENT
+                                    } else if pen_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::from_white_alpha((255.0 * t) as u8)
+                                        Color32::WHITE
                                     } else {
-                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
+                                        Color32::from_gray(130)
                                     };
                                     ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://pencil.png".into(),
                                         bytes: PENCIL_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(pen_tint));
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(pen_tint));
                                     if show_buttons && pen_resp.clicked() {
                                         self.editing_task    = Some(real_i);
                                         self.edit_buf         = task_text.clone();
@@ -1486,13 +1530,25 @@ impl eframe::App for App {
                                         ui.add_space(10.0);
                                         // Неактивная рутина — тусклый текст, не кликабельна
                                         // для promote (нельзя протолкнуть в main, пока не
-                                        // сработало расписание).
-                                        let text_color = if is_active {
+                                        // сработало расписание). Перетаскиваемая (is_dragged_row)
+                                        // строка — невидимый текст-плейсхолдер: место
+                                        // зарезервировано, но сам текст сейчас "летит" за
+                                        // курсором в виде превью на main/белой полоски.
+                                        let text_color = if is_dragged_row {
+                                            Color32::TRANSPARENT
+                                        } else if is_active {
                                             Color32::from_gray(200)
                                         } else {
                                             Color32::from_gray(90)
                                         };
-                                        let sense = if is_active && !list_locked { Sense::click() } else { Sense::hover() };
+                                        // Sense::drag() — клик по тексту больше НЕ promote'ит
+                                        // (это делает только перетаскивание выше разделителя),
+                                        // поэтому click() тут не нужен, только drag.
+                                        let sense = if is_active && !list_locked {
+                                            Sense::drag()
+                                        } else {
+                                            Sense::hover()
+                                        };
                                         // Подчёркивание — отдельный, независимый от text_color
                                         // сигнал "это рутина", только у активных строк
                                         // (тусклые/неактивные не подчёркиваем). Через
@@ -1504,7 +1560,7 @@ impl eframe::App for App {
                                             color: text_color,
                                             ..Default::default()
                                         };
-                                        if has_routine && is_active {
+                                        if has_routine && is_active && !is_dragged_row {
                                             fmt.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
                                         }
                                         let mut job = egui::text::LayoutJob::default();
@@ -1512,17 +1568,25 @@ impl eframe::App for App {
                                         let label_r = ui.add(
                                             egui::Label::new(job)
                                                 .truncate()
+                                                .selectable(false)
                                                 .sense(sense),
                                         );
+                                        // Курсор-"перемещение" (не палец) — подсказывает,
+                                        // что тут именно drag, а не клик; клик по тексту
+                                        // больше НИЧЕГО не делает — promote теперь только
+                                        // через перетаскивание выше разделителя.
                                         if is_active && !list_locked && label_r.hovered() {
-                                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                            ctx.set_cursor_icon(egui::CursorIcon::AllScroll);
                                         }
-                                        if is_active && !list_locked && label_r.clicked() { promote = Some(real_i); }
+                                        if is_active && !list_locked && label_r.drag_started() {
+                                            self.dragging_task = Some(real_i);
+                                        }
                                     });
                                 }
                             },
-                        );
+                        ).response
                         });
+                        row_rects.push((real_i, row_resp.inner.rect));
                     }
                 });
 
@@ -1555,6 +1619,52 @@ impl eframe::App for App {
             }
 
             let idx = self.active_project_idx;
+
+            // ── drag & drop: щель под курсором, белая полоска, коммит по отпусканию ──
+            if let Some(dragged_real_i) = self.dragging_task {
+                let pointer_released = ctx.input(|i| i.pointer.any_released());
+                match drag_pointer {
+                    None => {
+                        // Не смогли получить позицию курсора этим кадром (обычно
+                        // случается только на самом первом кадре drag_started,
+                        // до следующего кадра) — просто ничего не делаем.
+                        if pointer_released { self.dragging_task = None; }
+                    }
+                    Some(pointer) if dragging_above_divider => {
+                        // Курсор выше разделителя — при отпускании работает
+                        // РОВНО тот же путь, что и обычный клик по задаче
+                        // (promote), просто источник события другой.
+                        let _ = pointer;
+                        if pointer_released {
+                            promote = Some(dragged_real_i);
+                            self.dragging_task = None;
+                        }
+                    }
+                    Some(pointer) => {
+                        // Курсор ниже разделителя — ищем ближайшую щель между
+                        // строками (в display-порядке) по Y координате курсора:
+                        // первая строка, чей центр ниже курсора — вставляем
+                        // перед ней; если такой нет — курсор ниже всех строк,
+                        // вставляем в самый конец (разрешено явно).
+                        let mut insert_before: Option<usize> = None;
+                        let mut line_y = row_rects.last().map(|(_, r)| r.bottom())
+                            .unwrap_or(divider_y);
+                        for (r_real_i, rect) in row_rects.iter() {
+                            if pointer.y < rect.center().y {
+                                insert_before = Some(*r_real_i);
+                                line_y = rect.top();
+                                break;
+                            }
+                        }
+                        ui.painter().hline(0.0..=self.w, line_y, (2.0, Color32::WHITE));
+                        if pointer_released {
+                            self.projects[idx].reorder_sub(dragged_real_i, insert_before);
+                            self.dragging_task = None;
+                        }
+                    }
+                }
+            }
+
             if let Some(i) = promote {
                 if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
                     let _ = self.sync.record_op(sync::oplog::OpKind::PromoteTask {

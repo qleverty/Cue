@@ -295,6 +295,48 @@ impl LoadedProject {
         }
     }
 
+    /// Перетаскивание задачи по списку (drag & drop). `from` — физический
+    /// индекс перетаскиваемой задачи ДО перемещения. `to_before` — физический
+    /// индекс задачи, ПЕРЕД которой нужно вставить перетаскиваемую (в
+    /// display-порядке на момент отпускания мыши); `None` — вставить в
+    /// самый конец списка.
+    ///
+    /// order_key пересчитывается интерполяцией между order_key НОВЫХ
+    /// физических соседей (после перемещения) — сознательно не учитывает
+    /// группировку active/inactive: это просто число между двумя другими
+    /// числами, коллизии с order_key задач из другой группы безобидны (см.
+    /// обсуждение) и максимум приводят к сдвигу на одну строку при
+    /// реактивации рутины в редком случае.
+    ///
+    /// Физическая позиция в IndexMap двигается вместе с order_key, чтобы
+    /// порядок был согласован и при выключенном тумблере группировки (где
+    /// физический порядок — это и есть порядок отображения).
+    pub fn reorder_sub(&mut self, from: usize, to_before: Option<usize>) {
+        if Some(from) == to_before { return; } // дропнули на себя же — no-op
+        let Some((id, mut task)) = self.subs.shift_remove_index(from) else { return; };
+
+        // to_before был индексом ДО удаления; если он шёл после удалённого
+        // слота — после shift_remove_index он сместился на 1 назад.
+        let target = match to_before {
+            None => self.subs.len(), // конец списка
+            Some(before) if before > from => before - 1,
+            Some(before) => before,
+        };
+
+        let prev_key = target.checked_sub(1)
+            .and_then(|i| self.subs.get_index(i))
+            .map(|(_, t)| t.order_key);
+        let next_key = self.subs.get_index(target).map(|(_, t)| t.order_key);
+        task.order_key = match (prev_key, next_key) {
+            (Some(p), Some(n)) => (p + n) / 2.0,
+            (Some(p), None)    => p + 1000.0,
+            (None, Some(n))    => n - 1000.0,
+            (None, None)       => 0.0,
+        };
+
+        self.subs.shift_insert(target, id, task);
+    }
+
     /// Досрочное завершение рутины прямо в subs (крестик по активной
     /// рутине). В отличие от complete_main — никого никуда не двигаем и не
     /// продвигаем: задача и так уже была в subs, просто гасим active.
