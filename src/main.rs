@@ -1425,57 +1425,56 @@ impl eframe::App for App {
                                     // у ScrollArea), иначе разное число виджетов
                                     // между passes/кадрами сбивает автогенерируемые
                                     // Id ("Widget rect changed id between passes").
-                                    // Видимость регулируем ТОЛЬКО прозрачностью
-                                    // тинта, а не наличием/отсутствием ui.put.
-                                    ui.add_space(7.0);
+                                    // Появление/исчезновение — только через ПЛАВНОЕ
+                                    // изменение размера/отступа (t) и альфы тинта,
+                                    // а не наличие/отсутствие ui.put — количество
+                                    // вызовов остаётся неизменным на любом pass'е.
+                                    let anim_id = ui.id().with("btns_anim");
+                                    let t = ctx.animate_bool_with_time(anim_id, show_buttons, 0.15);
+
+                                    ui.add_space(7.0 * t);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
-                                        vec2(15.0, 15.0), Sense::click());
-                                    let cross_tint = if !show_buttons {
-                                        Color32::TRANSPARENT
-                                    } else if btn_resp.hovered() {
+                                        vec2(15.0 * t, 15.0), Sense::click());
+                                    let cross_tint = if btn_resp.hovered() && show_buttons {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::WHITE
+                                        Color32::from_white_alpha((255.0 * t) as u8)
                                     } else {
-                                        Color32::from_gray(130)
+                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
                                     };
                                     ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://cross.png".into(),
                                         bytes: CROSS_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(cross_tint));
                                     if show_buttons && btn_resp.clicked() { delete = Some(real_i); }
 
-                                    ui.add_space(4.0);
+                                    ui.add_space(4.0 * t);
                                     let (clk_rect, clk_resp) = ui.allocate_exact_size(
-                                        vec2(15.0, 15.0), Sense::click());
-                                    let clk_tint = if !show_buttons {
-                                        Color32::TRANSPARENT
-                                    } else if clk_resp.hovered() {
+                                        vec2(15.0 * t, 15.0), Sense::click());
+                                    let clk_tint = if clk_resp.hovered() && show_buttons {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::WHITE
+                                        Color32::from_white_alpha((255.0 * t) as u8)
                                     } else {
-                                        Color32::from_gray(130)
+                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
                                     };
                                     ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://clock.png".into(),
                                         bytes: CLOCK_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(clk_tint));
                                     if show_buttons && clk_resp.clicked() { open_routine = Some(real_i); }
 
-                                    ui.add_space(4.0);
+                                    ui.add_space(4.0 * t);
                                     let (pen_rect, pen_resp) = ui.allocate_exact_size(
-                                        vec2(15.0, 15.0), Sense::click());
-                                    let pen_tint = if !show_buttons {
-                                        Color32::TRANSPARENT
-                                    } else if pen_resp.hovered() {
+                                        vec2(15.0 * t, 15.0), Sense::click());
+                                    let pen_tint = if pen_resp.hovered() && show_buttons {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::WHITE
+                                        Color32::from_white_alpha((255.0 * t) as u8)
                                     } else {
-                                        Color32::from_gray(130)
+                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
                                     };
                                     ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://pencil.png".into(),
                                         bytes: PENCIL_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(pen_tint));
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(pen_tint));
                                     if show_buttons && pen_resp.clicked() {
                                         self.editing_task    = Some(real_i);
                                         self.edit_buf         = task_text.clone();
