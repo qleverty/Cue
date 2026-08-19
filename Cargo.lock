@@ -361,6 +361,7 @@ dependencies = [
  "fs2",
  "image",
  "indexmap",
+ "log",
  "mimalloc",
  "serde",
  "serde_json",

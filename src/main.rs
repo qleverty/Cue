@@ -33,6 +33,25 @@ macro_rules! clog {
     ($($arg:tt)*) => { crate::write_log(&format!($($arg)*)) };
 }
 
+/// Мост между стандартным `log`-фасадом (через который egui шлёт свои
+/// внутренние warn!/error!, включая "id clash") и уже существующим
+/// файловым логом (debug.log) — без egui-варнингов было физически некуда
+/// смотреть: GUI-процесс на Windows не имеет консоли, а без установленного
+/// log::Log egui'шные log::warn! просто молча пропадали в никуда.
+struct FileLogger;
+impl log::Log for FileLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+    fn log(&self, record: &log::Record) {
+        if self.enabled(record.metadata()) {
+            write_log(&format!("[{}] {} — {}", record.level(), record.target(), record.args()));
+        }
+    }
+    fn flush(&self) {}
+}
+static FILE_LOGGER: FileLogger = FileLogger;
+
 use eframe::egui::{
     self, Align, Color32, ImageSource, Layout, RichText,
     Sense, Stroke, Ui, ViewportCommand, vec2,
@@ -1330,6 +1349,27 @@ impl eframe::App for App {
                         let has_routine = *has_routine;
                         let is_editing  = self.editing_task == Some(real_i);
 
+                        // Прямоугольник ВСЕЙ строки — вычисляем до отрисовки, чтобы
+                        // без лага в кадр знать, наведён ли курсор именно на строку
+                        // целиком (а не только когда текст под указателем).
+                        let row_rect = egui::Rect::from_min_size(
+                            ui.cursor().min, vec2(self.w, ROW - 5.0));
+                        let row_hovered = ui.rect_contains_pointer(row_rect);
+                        // Кнопки видны только на hover обычной строки; если строка
+                        // сама редактируется — у неё всегда своя галочка (см. ниже);
+                        // если залочена из-за редактирования ДРУГОЙ строки — кнопки
+                        // не показываем вовсе, они всё равно нерабочие сейчас.
+                        let show_buttons = row_hovered && !list_locked;
+
+                        // push_id — обязательный паттерн egui для виджетов в цикле:
+                        // без него авто-Id внутри строки строятся по счётчику вызовов
+                        // ui.put/allocate_exact_size, а этот счётчик "плывёт" между
+                        // кадрами из-за show_buttons (разное число реально нарисованных
+                        // виджетов на разных строках/кадрах) — отсюда и ID-клэш с
+                        // красными предупреждениями egui. push_id(real_i, ...) солит
+                        // все Id внутри строки стабильным индексом задачи и полностью
+                        // убирает возможность коллизии.
+                        ui.push_id(real_i, |ui| {
                         ui.allocate_ui_with_layout(
                             vec2(self.w, ROW - 5.0),
                             Layout::right_to_left(Align::Center),
@@ -1378,10 +1418,21 @@ impl eframe::App for App {
                                     });
                                 } else {
                                     // ── обычный режим строки ───────────────────
+                                    // ВАЖНО: все три ui.put()-виджета вызываются
+                                    // БЕЗУСЛОВНО каждый раз — структура виджетов
+                                    // должна быть идентичной на каждом internal
+                                    // pass'е egui (multi-pass layout, см. auto_shrink
+                                    // у ScrollArea), иначе разное число виджетов
+                                    // между passes/кадрами сбивает автогенерируемые
+                                    // Id ("Widget rect changed id between passes").
+                                    // Видимость регулируем ТОЛЬКО прозрачностью
+                                    // тинта, а не наличием/отсутствием ui.put.
                                     ui.add_space(7.0);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
                                         vec2(15.0, 15.0), Sense::click());
-                                    let cross_tint = if !list_locked && btn_resp.hovered() {
+                                    let cross_tint = if !show_buttons {
+                                        Color32::TRANSPARENT
+                                    } else if btn_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                         Color32::WHITE
                                     } else {
@@ -1391,12 +1442,14 @@ impl eframe::App for App {
                                         uri: "bytes://cross.png".into(),
                                         bytes: CROSS_PNG.into(),
                                     }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
-                                    if !list_locked && btn_resp.clicked() { delete = Some(real_i); }
+                                    if show_buttons && btn_resp.clicked() { delete = Some(real_i); }
 
                                     ui.add_space(4.0);
                                     let (clk_rect, clk_resp) = ui.allocate_exact_size(
                                         vec2(15.0, 15.0), Sense::click());
-                                    let clk_tint = if !list_locked && clk_resp.hovered() {
+                                    let clk_tint = if !show_buttons {
+                                        Color32::TRANSPARENT
+                                    } else if clk_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                         Color32::WHITE
                                     } else {
@@ -1406,12 +1459,14 @@ impl eframe::App for App {
                                         uri: "bytes://clock.png".into(),
                                         bytes: CLOCK_PNG.into(),
                                     }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
-                                    if !list_locked && clk_resp.clicked() { open_routine = Some(real_i); }
+                                    if show_buttons && clk_resp.clicked() { open_routine = Some(real_i); }
 
                                     ui.add_space(4.0);
                                     let (pen_rect, pen_resp) = ui.allocate_exact_size(
                                         vec2(15.0, 15.0), Sense::click());
-                                    let pen_tint = if !list_locked && pen_resp.hovered() {
+                                    let pen_tint = if !show_buttons {
+                                        Color32::TRANSPARENT
+                                    } else if pen_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                         Color32::WHITE
                                     } else {
@@ -1421,7 +1476,7 @@ impl eframe::App for App {
                                         uri: "bytes://pencil.png".into(),
                                         bytes: PENCIL_PNG.into(),
                                     }).fit_to_exact_size(vec2(8.0, 8.0)).tint(pen_tint));
-                                    if !list_locked && pen_resp.clicked() {
+                                    if show_buttons && pen_resp.clicked() {
                                         self.editing_task    = Some(real_i);
                                         self.edit_buf         = task_text.clone();
                                         self.edit_need_focus  = true;
@@ -1468,6 +1523,7 @@ impl eframe::App for App {
                                 }
                             },
                         );
+                        });
                     }
                 });
 
@@ -1682,6 +1738,10 @@ fn main() -> eframe::Result<()> {
     LOG_PATH.set(app_dir().join("debug.log")).ok();
     // Truncate log on each run so it doesn't grow forever during debugging.
     let _ = std::fs::write(app_dir().join("debug.log"), "");
+    // Подключаем FileLogger к стандартному log-фасаду — без этого egui
+    // молча глотал бы свои внутренние warn! (в т.ч. "id clash"), и красные
+    // квадраты на экране были бы без единого объяснения, откуда они.
+    let _ = log::set_logger(&FILE_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
     clog!("=== Cue started ===");
 
     if let Some(lock) = read_lock() {
