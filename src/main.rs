@@ -48,6 +48,14 @@ pub const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
 static TICK_PNG:  &[u8] = include_bytes!("../pics/tick.png");
 pub static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
+/// Маленькая галочка — подтверждение инлайн-редактирования текста задачи
+/// (появляется на месте кнопки-крестика, пока задача редактируется).
+static TICK_SMALL_PNG: &[u8] = include_bytes!("../pics/tick_small.png");
+/// Карандаш — кнопка входа в режим инлайн-редактирования текста задачи.
+static PENCIL_PNG: &[u8] = include_bytes!("../pics/pencil.png");
+/// Жёлтые часы — кнопка настройки routine у sub-задачи (сейчас временно
+/// использовала CROSS_PNG как заглушку).
+static CLOCK_PNG: &[u8] = include_bytes!("../pics/clock.png");
 pub(crate) static ICON_PNG:  &[u8] = include_bytes!("../icon.png");
 
 // ── paths ─────────────────────────────────────────────────────────────────────
@@ -253,6 +261,12 @@ struct App {
     /// воскресил их обратно. Наполняется только пока project_loader_rx —
     /// Some; очищается сразу после успешного мёржа батча (окно закрылось).
     deleted_during_load:    std::collections::HashSet<String>,
+    /// real_i (индекс в subs) задачи, которая сейчас редактируется инлайн
+    /// (карандаш). None — никто не редактируется. Пока Some — весь список
+    /// subs залочен для остальных кнопок (крестик/routine/карандаш).
+    editing_task:            Option<usize>,
+    edit_buf:                String,
+    edit_need_focus:         bool,
 }
 
 impl App {
@@ -394,6 +408,9 @@ impl App {
             last_lock_refresh:     0, // 0 → первое обновление лока в update() сработает сразу
             project_loader_rx,
             deleted_during_load:   std::collections::HashSet::new(),
+            editing_task:          None,
+            edit_buf:              String::new(),
+            edit_need_focus:       false,
         };
 
         app
@@ -1289,8 +1306,18 @@ impl eframe::App for App {
         }
         // иначе (тумблер выключен) — оставляем физический порядок как есть
 
+        // Если в этом кадре инлайн-редактирование текста задачи (карандаш)
+        // было закоммичено/отменено по Enter — тем же нажатием НЕ должно
+        // ещё и активироваться поле "Добавить..." ниже (см. global_enter).
+        let mut edit_just_finished = false;
+
         if !display_order.is_empty() {
             let (mut promote, mut delete, mut open_routine) = (None::<usize>, None::<usize>, None::<usize>);
+            let (mut commit_edit, mut cancel_edit) = (false, false);
+            // Пока какая-то задача редактируется — весь список залочен для
+            // остальных кнопок (см. решение выше: не даём кликать по чужим
+            // крестикам/routine/карандашу, пока идёт правка).
+            let list_locked = self.editing_task.is_some();
 
             let scroll_h = display_order.len().min(9) as f32 * (ROW - 5.0);
             egui::ScrollArea::vertical()
@@ -1301,82 +1328,176 @@ impl eframe::App for App {
                         let real_i      = *real_i;
                         let is_active   = *is_active;
                         let has_routine = *has_routine;
+                        let is_editing  = self.editing_task == Some(real_i);
+
                         ui.allocate_ui_with_layout(
                             vec2(self.w, ROW - 5.0),
                             Layout::right_to_left(Align::Center),
                             |ui| {
-                                ui.add_space(7.0);
-                                let (btn_rect, btn_resp) = ui.allocate_exact_size(
-                                    vec2(15.0, 15.0), Sense::click());
-                                let cross_tint = if btn_resp.hovered() {
-                                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    Color32::WHITE
-                                } else {
-                                    Color32::from_gray(130)
-                                };
-                                ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
-                                    uri: "bytes://cross.png".into(),
-                                    bytes: CROSS_PNG.into(),
-                                }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
-                                if btn_resp.clicked() { delete = Some(real_i); }
-
-                                ui.add_space(4.0);
-                                let (clk_rect, clk_resp) = ui.allocate_exact_size(
-                                    vec2(15.0, 15.0), Sense::click());
-                                let clk_tint = if clk_resp.hovered() {
-                                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                    Color32::WHITE
-                                } else {
-                                    Color32::from_gray(90)
-                                };
-                                ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
-                                    uri: "bytes://cross.png".into(),
-                                    bytes: CROSS_PNG.into(),
-                                }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
-                                if clk_resp.clicked() { open_routine = Some(real_i); }
-
-                                ui.add_space(6.0);
-                                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                                    ui.add_space(10.0);
-                                    // Неактивная рутина — тусклый текст, не кликабельна
-                                    // для promote (нельзя протолкнуть в main, пока не
-                                    // сработало расписание).
-                                    let text_color = if is_active {
-                                        Color32::from_gray(200)
-                                    } else {
-                                        Color32::from_gray(90)
-                                    };
-                                    let sense = if is_active { Sense::click() } else { Sense::hover() };
-                                    // Подчёркивание — отдельный, независимый от text_color
-                                    // сигнал "это рутина", только у активных строк
-                                    // (тусклые/неактивные не подчёркиваем). Через
-                                    // LayoutJob/TextFormat, а не
-                                    // RichText::underline() — иначе цвет линии слипается
-                                    // с цветом текста.
-                                    let mut fmt = egui::text::TextFormat {
-                                        font_id: egui::FontId::proportional(13.0),
-                                        color: text_color,
-                                        ..Default::default()
-                                    };
-                                    if has_routine && is_active {
-                                        fmt.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
-                                    }
-                                    let mut job = egui::text::LayoutJob::default();
-                                    job.append(task_text.as_str(), 0.0, fmt);
-                                    let label_r = ui.add(
-                                        egui::Label::new(job)
-                                            .truncate()
-                                            .sense(sense),
-                                    );
-                                    if is_active && label_r.hovered() {
+                                if is_editing {
+                                    // ── режим редактирования этой строки ───────
+                                    ui.add_space(7.0);
+                                    let (chk_rect, chk_resp) = ui.allocate_exact_size(
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let chk_tint = if chk_resp.hovered() {
                                         ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        Color32::WHITE
+                                    } else {
+                                        Color32::from_gray(130)
+                                    };
+                                    ui.put(chk_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://tick_small.png".into(),
+                                        bytes: TICK_SMALL_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(chk_tint));
+
+                                    ui.add_space(6.0);
+                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                        ui.add_space(10.0);
+                                        let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+                                        let enter  = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+
+                                        let r = ui.add(
+                                            egui::TextEdit::singleline(&mut self.edit_buf)
+                                                .desired_width(self.w - 36.0)
+                                                .text_color(Color32::from_gray(200))
+                                                .font(egui::FontId::proportional(13.0)),
+                                        );
+                                        if self.edit_need_focus {
+                                            r.request_focus();
+                                            self.edit_need_focus = false;
+                                        }
+
+                                        let window_focused = ctx.input(|i| i.focused);
+                                        let lost = r.lost_focus() || !window_focused;
+
+                                        if escape {
+                                            cancel_edit = true;
+                                        } else if enter || lost || chk_resp.clicked() {
+                                            commit_edit = true;
+                                        }
+                                    });
+                                } else {
+                                    // ── обычный режим строки ───────────────────
+                                    ui.add_space(7.0);
+                                    let (btn_rect, btn_resp) = ui.allocate_exact_size(
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let cross_tint = if !list_locked && btn_resp.hovered() {
+                                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        Color32::WHITE
+                                    } else {
+                                        Color32::from_gray(130)
+                                    };
+                                    ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://cross.png".into(),
+                                        bytes: CROSS_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
+                                    if !list_locked && btn_resp.clicked() { delete = Some(real_i); }
+
+                                    ui.add_space(4.0);
+                                    let (clk_rect, clk_resp) = ui.allocate_exact_size(
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let clk_tint = if !list_locked && clk_resp.hovered() {
+                                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        Color32::WHITE
+                                    } else {
+                                        Color32::from_gray(130)
+                                    };
+                                    ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://clock.png".into(),
+                                        bytes: CLOCK_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(clk_tint));
+                                    if !list_locked && clk_resp.clicked() { open_routine = Some(real_i); }
+
+                                    ui.add_space(4.0);
+                                    let (pen_rect, pen_resp) = ui.allocate_exact_size(
+                                        vec2(15.0, 15.0), Sense::click());
+                                    let pen_tint = if !list_locked && pen_resp.hovered() {
+                                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        Color32::WHITE
+                                    } else {
+                                        Color32::from_gray(130)
+                                    };
+                                    ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://pencil.png".into(),
+                                        bytes: PENCIL_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0, 8.0)).tint(pen_tint));
+                                    if !list_locked && pen_resp.clicked() {
+                                        self.editing_task    = Some(real_i);
+                                        self.edit_buf         = task_text.clone();
+                                        self.edit_need_focus  = true;
                                     }
-                                    if is_active && label_r.clicked() { promote = Some(real_i); }
-                                });
+
+                                    ui.add_space(6.0);
+                                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                        ui.add_space(10.0);
+                                        // Неактивная рутина — тусклый текст, не кликабельна
+                                        // для promote (нельзя протолкнуть в main, пока не
+                                        // сработало расписание).
+                                        let text_color = if is_active {
+                                            Color32::from_gray(200)
+                                        } else {
+                                            Color32::from_gray(90)
+                                        };
+                                        let sense = if is_active && !list_locked { Sense::click() } else { Sense::hover() };
+                                        // Подчёркивание — отдельный, независимый от text_color
+                                        // сигнал "это рутина", только у активных строк
+                                        // (тусклые/неактивные не подчёркиваем). Через
+                                        // LayoutJob/TextFormat, а не
+                                        // RichText::underline() — иначе цвет линии слипается
+                                        // с цветом текста.
+                                        let mut fmt = egui::text::TextFormat {
+                                            font_id: egui::FontId::proportional(13.0),
+                                            color: text_color,
+                                            ..Default::default()
+                                        };
+                                        if has_routine && is_active {
+                                            fmt.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
+                                        }
+                                        let mut job = egui::text::LayoutJob::default();
+                                        job.append(task_text.as_str(), 0.0, fmt);
+                                        let label_r = ui.add(
+                                            egui::Label::new(job)
+                                                .truncate()
+                                                .sense(sense),
+                                        );
+                                        if is_active && !list_locked && label_r.hovered() {
+                                            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                        if is_active && !list_locked && label_r.clicked() { promote = Some(real_i); }
+                                    });
+                                }
                             },
                         );
                     }
                 });
+
+            edit_just_finished = commit_edit || cancel_edit;
+            if edit_just_finished {
+                if let Some(i) = self.editing_task {
+                    if commit_edit {
+                        let new_text = self.edit_buf.trim().to_string();
+                        let idx = self.active_project_idx;
+                        let old_text = self.projects[idx].subs.get_index(i).map(|(_, t)| t.text.clone());
+                        // Пустой текст или текст не поменялся — не шлём EDIT_TASK,
+                        // просто выходим из режима редактирования.
+                        if !new_text.is_empty() && old_text.as_deref() != Some(new_text.as_str()) {
+                            if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
+                                let task_id = task_id.clone();
+                                let _ = self.sync.record_op(sync::oplog::OpKind::EditTask {
+                                    project_id: self.projects[idx].id.clone(),
+                                    task_id,
+                                    text: new_text.clone(),
+                                });
+                            }
+                            self.projects[idx].edit_sub(i, new_text);
+                            self.projects[idx].save();
+                        }
+                    }
+                }
+                self.editing_task = None;
+                self.edit_buf.clear();
+                ctx.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
+            }
 
             let idx = self.active_project_idx;
             if let Some(i) = promote {
@@ -1481,7 +1602,13 @@ impl eframe::App for App {
                     ctx.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
                 }
             } else {
-                let global_enter = ctx.input(|i| i.key_pressed(egui::Key::Enter));
+                // Не даём Enter'у активировать "Добавить...", если этим же Enter'ом
+                // только что закоммитили/отменили инлайн-редактирование текста
+                // задачи (карандаш) — иначе один Enter делает сразу два дела.
+                // editing_task к этому моменту уже сброшен в None выше по кадру,
+                // поэтому проверяем именно edit_just_finished, а не editing_task.
+                let global_enter = !edit_just_finished
+                    && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
                 let add_btn = ui.add(
                     egui::Button::new(

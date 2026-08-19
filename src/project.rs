@@ -283,6 +283,13 @@ impl LoadedProject {
         self.subs.shift_remove_index(i);
     }
 
+    /// Инлайн-редактирование текста sub-задачи (кнопка-карандаш).
+    pub fn edit_sub(&mut self, i: usize, text: String) {
+        if let Some((_, task)) = self.subs.get_index_mut(i) {
+            task.text = text;
+        }
+    }
+
     /// Досрочное завершение рутины прямо в subs (крестик по активной
     /// рутине). В отличие от complete_main — никого никуда не двигаем и не
     /// продвигаем: задача и так уже была в subs, просто гасим active.
