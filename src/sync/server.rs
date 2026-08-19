@@ -65,19 +65,21 @@ pub fn start(state: Arc<SharedState>) -> std::thread::JoinHandle<()> {
 fn bind_with_retry() -> Server {
     let mut last_yield_sent = Instant::now() - Duration::from_millis(YIELD_RESEND_MS);
     loop {
-        let attempt = crate::exclusive_bind::bind_exclusive(PORT).ok()
-            .and_then(|l| Server::from_listener(l, None).ok());
-        match attempt {
-            Some(server) => return server,
-            None => {
-                crate::clog!("[sync/server] bind failed on port {PORT}");
-                if last_yield_sent.elapsed() >= Duration::from_millis(YIELD_RESEND_MS) {
-                    send_yield();
-                    last_yield_sent = Instant::now();
+        match crate::exclusive_bind::bind_exclusive(PORT) {
+            Ok(listener) => match Server::from_listener(listener, None) {
+                Ok(server) => {
+                    crate::clog!("[sync/server] bind SUCCEEDED on port {PORT}");
+                    return server;
                 }
-                std::thread::sleep(Duration::from_millis(BIND_RETRY_MS));
-            }
+                Err(e) => crate::clog!("[sync/server] from_listener failed: {e:?}"),
+            },
+            Err(e) => crate::clog!("[sync/server] bind_exclusive failed: {e:?}"),
         }
+        if last_yield_sent.elapsed() >= Duration::from_millis(YIELD_RESEND_MS) {
+            send_yield();
+            last_yield_sent = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(BIND_RETRY_MS));
     }
 }
 
