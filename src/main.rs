@@ -1655,7 +1655,7 @@ impl eframe::App for App {
                                 break;
                             }
                         }
-                        ui.painter().hline(0.0..=self.w, line_y, (0.5, SEP));
+                        ui.painter().hline(0.0..=self.w, line_y, (0.41, SEP));
                         if pointer_released {
                             self.projects[idx].reorder_sub(dragged_real_i, insert_before);
                             self.dragging_task = None;
