@@ -96,7 +96,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut DatePickerState) {
         .order(Order::Foreground)
         .show(ui.ctx(), |ui| {
             egui::Frame::new()
-                .fill(Color32::from_rgba_premultiplied(0, 0, 0, 204))
+                .fill(Color32::from_rgba_premultiplied(0, 0, 0, 220))
                 .corner_radius(6.0)
                 .inner_margin(egui::Margin::same(8))
                 .stroke(egui::Stroke::new(0.5, Color32::from_white_alpha(18)))

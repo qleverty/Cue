@@ -947,7 +947,7 @@ impl eframe::App for App {
                     .order(egui::Order::Foreground)
                     .show(&ctx, |ui| {
                         egui::Frame::new()
-                            .fill(Color32::from_rgba_premultiplied(0, 0, 0, 204))
+                            .fill(Color32::from_rgba_premultiplied(0, 0, 0, 220))
                             .corner_radius(6.0)
                             .inner_margin(egui::Margin::same(4))
                             .show(ui, |ui| {
@@ -966,14 +966,13 @@ impl eframe::App for App {
                                                 vec2(row_w, ROW_H), Sense::hover());
                                             if rr_resp.hovered() {
                                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                                ui.painter().rect_filled(rr, 3.0,
-                                                    Color32::from_white_alpha(12));
-                                            } else if is_active {
-                                                ui.painter().rect_filled(rr, 3.0,
-                                                    Color32::from_white_alpha(8));
                                             }
 
-                                            let label_col = if is_active {
+                                            // Белый — если проект активен ИЛИ наведён курсором
+                                            // (фоновую плашку-подсветку убрали — при таких низких
+                                            // альфах она была практически незаметна; вместо неё
+                                            // сигналит сам цвет текста).
+                                            let label_col = if is_active || rr_resp.hovered() {
                                                 Color32::WHITE
                                             } else {
                                                 Color32::from_gray(190)
@@ -1020,7 +1019,7 @@ impl eframe::App for App {
                                                 ui.put(del_rect, egui::Image::new(ImageSource::Bytes {
                                                     uri: "bytes://cross.png".into(),
                                                     bytes: CROSS_PNG.into(),
-                                                }).fit_to_exact_size(vec2(8.0, 8.0)).tint(cross_tint));
+                                                }).fit_to_exact_size(vec2(7.0, 7.0)).tint(cross_tint));
                                                 if del_resp.clicked() { delete_project = Some(i); }
                                             }
                                         }
@@ -1369,6 +1368,21 @@ impl eframe::App for App {
 
         if !display_order.is_empty() {
             let (mut promote, mut delete, mut open_routine) = (None::<usize>, None::<usize>, None::<usize>);
+            // Так же, как promote/delete/open_routine — НЕ мутируем self
+            // напрямую внутри цикла отрисовки. Если начать драг или
+            // редактирование прямо посреди цикла, а суммарная высота списка
+            // из-за этого поменяется (пропадёт/появится строка), egui может
+            // тем же кадром перезапустить internal pass (auto_shrink) — и
+            // тот pass увидит self.dragging_task/editing_task УЖЕ
+            // изменённым, тогда как первый pass успел отрисовать часть строк
+            // до изменения. Структура между двумя pass'ами одного кадра
+            // расходится → "Widget rect changed id between passes" (см. баг
+            // с красными квадратами, который мы уже один раз чинили).
+            // Откладывая мутацию до конца цикла, гарантируем, что
+            // self.dragging_task/editing_task не меняются в течение ВСЕГО
+            // текущего кадра — вступают в силу только со следующего.
+            let mut start_drag: Option<usize> = None;
+            let mut start_edit: Option<usize> = None;
             let (mut commit_edit, mut cancel_edit) = (false, false);
             // Пока какая-то задача редактируется ИЛИ перетаскивается — весь
             // список залочен для остальных кнопок (не даём кликать по
@@ -1376,7 +1390,15 @@ impl eframe::App for App {
             // или drag).
             let list_locked = self.editing_task.is_some() || self.dragging_task.is_some();
 
-            let scroll_h = display_order.len().min(9) as f32 * (ROW - 5.0);
+            // Высота ScrollArea считается по РЕАЛЬНО отрисовываемым строкам —
+            // пока задача перетаскивается, её строка полностью пропускается
+            // (см. `continue` ниже), поэтому видимых строк на одну меньше.
+            let visible_rows = if self.dragging_task.is_some() {
+                display_order.len().saturating_sub(1)
+            } else {
+                display_order.len()
+            };
+            let scroll_h = visible_rows.min(9) as f32 * (ROW - 5.0);
             // Реальные экранные прямоугольники строк (в display-порядке) —
             // нужны после цикла, чтобы по Y координате курсора найти щель
             // под белую полоску-индикатор и вычислить target для reorder_sub.
@@ -1391,6 +1413,19 @@ impl eframe::App for App {
                         let has_routine = *has_routine;
                         let is_editing  = self.editing_task == Some(real_i);
                         let is_dragged_row = self.dragging_task == Some(real_i);
+
+                        // Перетаскиваемая строка ПОЛНОСТЬЮ пропускается — не
+                        // просто невидима, а физически не занимает места, весь
+                        // список смыкается вокруг неё. Это безопасно (не
+                        // повторяет баг "Widget rect changed id between
+                        // passes"): is_dragged_row зависит только от
+                        // self.dragging_task — обычного состояния приложения,
+                        // неизменного в пределах одного кадра между двумя
+                        // internal-проходами egui (в отличие от show_buttons,
+                        // который зависел от текущей геометрии курсора и мог
+                        // "плыть" между проходами). Поэтому решение
+                        // рисовать/не рисовать тут стабильно на любом pass'е.
+                        if is_dragged_row { continue; }
 
                         // Прямоугольник ВСЕЙ строки — вычисляем до отрисовки, чтобы
                         // без лага в кадр знать, наведён ли курсор именно на строку
@@ -1474,54 +1509,85 @@ impl eframe::App for App {
                                     // вызовов остаётся неизменным на любом pass'е.
                                     let anim_id = ui.id().with("btns_anim");
                                     let t = ctx.animate_bool_with_time(anim_id, show_buttons, 0.15);
+                                    // Забеливание на hover — через alpha-compositing (умножение
+                                    // тинтом не может выбелить цветной пиксель, только притемнить
+                                    // или оставить как есть). Базовый слой — оригинальные цвета
+                                    // иконки. Поверх — ТОТ ЖЕ PNG ещё раз с белым тинтом; ВАЖНО:
+                                    // этот второй ui.put() вызывается БЕЗУСЛОВНО каждый кадр,
+                                    // видимость регулируется ТОЛЬКО его альфой (0 = невидим на вид,
+                                    // но структурно всё равно нарисован) — а не наличием/
+                                    // отсутствием вызова, иначе снова ловим "Widget rect changed
+                                    // id between passes" (тот самый баг с красными квадратами).
+                                    const HOVER_BLEACH_ALPHA: f32 = 255.0;
+                                    const BLEACH_LAYERS: u32 = 3;
 
                                     ui.add_space(7.0 * t);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
                                         vec2(15.0 * t, 15.0), Sense::click());
-                                    let cross_tint = if btn_resp.hovered() && show_buttons {
-                                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::from_white_alpha((255.0 * t) as u8)
-                                    } else {
-                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
-                                    };
+                                    let btn_hovered = btn_resp.hovered() && show_buttons;
+                                    if btn_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
                                     ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://cross.png".into(),
                                         bytes: CROSS_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(cross_tint));
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                        .tint(Color32::from_white_alpha((255.0 * t) as u8)));
+                                    let cross_bleach = if btn_hovered { HOVER_BLEACH_ALPHA } else { 0.0 };
+                                    // Несколько наложений подряд вместо одного — альфа
+                                    // итогового наложения ограничена собственной альфой
+                                    // пикселей PNG (tint умножает, не заменяет), так что один
+                                    // проход может не дотягивать до полностью белого, даже на
+                                    // максимальной константе. Каждый доп. слой (a-over-a)
+                                    // приближает результат к сплошной заливке. Все три
+                                    // безусловны, как и раньше — меняется только альфа.
+                                    for _ in 0..BLEACH_LAYERS {
+                                        ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
+                                            uri: "bytes://cross.png".into(),
+                                            bytes: CROSS_PNG.into(),
+                                        }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                            .tint(Color32::from_white_alpha((cross_bleach * t) as u8)));
+                                    }
                                     if show_buttons && btn_resp.clicked() { delete = Some(real_i); }
 
                                     ui.add_space(4.0 * t);
                                     let (clk_rect, clk_resp) = ui.allocate_exact_size(
                                         vec2(15.0 * t, 15.0), Sense::click());
-                                    let clk_tint = if clk_resp.hovered() && show_buttons {
-                                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::from_white_alpha((255.0 * t) as u8)
-                                    } else {
-                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
-                                    };
+                                    let clk_hovered = clk_resp.hovered() && show_buttons;
+                                    if clk_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
                                     ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://clock.png".into(),
                                         bytes: CLOCK_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(clk_tint));
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                        .tint(Color32::from_white_alpha((255.0 * t) as u8)));
+                                    let clk_bleach = if clk_hovered { HOVER_BLEACH_ALPHA } else { 0.0 };
+                                    for _ in 0..BLEACH_LAYERS {
+                                        ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
+                                            uri: "bytes://clock.png".into(),
+                                            bytes: CLOCK_PNG.into(),
+                                        }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                            .tint(Color32::from_white_alpha((clk_bleach * t) as u8)));
+                                    }
                                     if show_buttons && clk_resp.clicked() { open_routine = Some(real_i); }
 
                                     ui.add_space(4.0 * t);
                                     let (pen_rect, pen_resp) = ui.allocate_exact_size(
                                         vec2(15.0 * t, 15.0), Sense::click());
-                                    let pen_tint = if pen_resp.hovered() && show_buttons {
-                                        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                        Color32::from_white_alpha((255.0 * t) as u8)
-                                    } else {
-                                        Color32::from_rgba_unmultiplied(130, 130, 130, (255.0 * t) as u8)
-                                    };
+                                    let pen_hovered = pen_resp.hovered() && show_buttons;
+                                    if pen_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
                                     ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://pencil.png".into(),
                                         bytes: PENCIL_PNG.into(),
-                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t)).tint(pen_tint));
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                        .tint(Color32::from_white_alpha((255.0 * t) as u8)));
+                                    let pen_bleach = if pen_hovered { HOVER_BLEACH_ALPHA } else { 0.0 };
+                                    for _ in 0..BLEACH_LAYERS {
+                                        ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
+                                            uri: "bytes://pencil.png".into(),
+                                            bytes: PENCIL_PNG.into(),
+                                        }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                            .tint(Color32::from_white_alpha((pen_bleach * t) as u8)));
+                                    }
                                     if show_buttons && pen_resp.clicked() {
-                                        self.editing_task    = Some(real_i);
-                                        self.edit_buf         = task_text.clone();
-                                        self.edit_need_focus  = true;
+                                        start_edit = Some(real_i);
                                     }
 
                                     ui.add_space(6.0);
@@ -1578,7 +1644,7 @@ impl eframe::App for App {
                                             ctx.set_cursor_icon(egui::CursorIcon::AllScroll);
                                         }
                                         if is_active && !list_locked && label_r.drag_started() {
-                                            self.dragging_task = Some(real_i);
+                                            start_drag = Some(real_i);
                                         }
                                     });
                                 }
@@ -1618,6 +1684,19 @@ impl eframe::App for App {
             }
 
             let idx = self.active_project_idx;
+
+            // Применяем отложенные мутации ТОЛЬКО теперь, когда весь цикл
+            // отрисовки для этого кадра уже полностью завершён — см.
+            // комментарий у объявления start_drag/start_edit выше.
+            if let Some(i) = start_edit {
+                self.editing_task   = Some(i);
+                self.edit_buf       = self.projects[idx].subs.get_index(i)
+                    .map(|(_, t)| t.text.clone()).unwrap_or_default();
+                self.edit_need_focus = true;
+            }
+            if let Some(i) = start_drag {
+                self.dragging_task = Some(i);
+            }
 
             // ── drag & drop: щель под курсором, белая полоска, коммит по отпусканию ──
             if let Some(dragged_real_i) = self.dragging_task {
