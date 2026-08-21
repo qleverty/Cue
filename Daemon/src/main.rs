@@ -35,11 +35,22 @@ pub fn app_dir() -> std::path::PathBuf {
 
 const TICK_INTERVAL_SECS: u64 = 60;
 
-fn tick(projects: &mut [project::LoadedProject]) {
-    if cue_liveness::cue_is_running() {
-        println!("[cue_daemon] Cue жива, пропускаю тик");
+fn tick(projects: &mut Vec<project::LoadedProject>, cue_was_running: &mut bool) {
+    let cue_running = cue_liveness::cue_is_running();
+
+    if cue_running {
+        if !*cue_was_running {
+            println!("[cue_daemon] Cue жива, пропускаю тик");
+        }
+        *cue_was_running = true;
         return;
     }
+
+    if *cue_was_running {
+        println!("[cue_daemon] Cue закрылась, перечитываю проекты с диска");
+        *projects = project::load_all_projects();
+    }
+    *cue_was_running = false;
 
     let now = routine_scheduler::local_now();
 
@@ -81,8 +92,10 @@ fn main() {
     let mut projects = project::load_all_projects();
     println!("[cue_daemon] прочитано проектов: {}", projects.len());
 
+    let mut cue_was_running = cue_liveness::cue_is_running();
+
     loop {
-        tick(&mut projects);
+        tick(&mut projects, &mut cue_was_running);
         std::thread::sleep(std::time::Duration::from_secs(TICK_INTERVAL_SECS));
     }
 }
