@@ -1545,6 +1545,17 @@ impl eframe::App for App {
                                     // вызовов остаётся неизменным на любом pass'е.
                                     let anim_id = ui.id().with("btns_anim");
                                     let t = ctx.animate_bool_with_time(anim_id, show_buttons, 0.15);
+                                    // Для перетаскиваемой строки схлопывание должно быть
+                                    // МГНОВЕННЫМ (список сразу смыкается), а не за 150мс, как
+                                    // обычное появление/исчезновение кнопок на hover — эту
+                                    // анимацию трогать не хотим, она отдельно нравится. Поэтому
+                                    // ctx.animate_bool_with_time всё равно вызываем каждый кадр
+                                    // (чтобы не задеть саму механику анимации у остальных строк),
+                                    // но РЕЗУЛЬТАТ для этой конкретной строки перебиваем на
+                                    // жёсткий 0.0 — визуально мгновенно, при этом ничего не
+                                    // меняя в структуре вызовов ниже (по-прежнему используется
+                                    // одна и та же переменная `t`).
+                                    let t = if is_dragged_row { 0.0 } else { t };
                                     // Забеливание на hover — через alpha-compositing (умножение
                                     // тинтом не может выбелить цветной пиксель, только притемнить
                                     // или оставить как есть). Базовый слой — оригинальные цвета
@@ -1565,7 +1576,7 @@ impl eframe::App for App {
 
                                     ui.add_space(7.0 * t);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
-                                        vec2(15.0 * t, 15.0), Sense::click());
+                                        vec2(15.0 * t, 15.0 * t), Sense::click());
                                     let btn_hovered = btn_resp.hovered() && show_buttons;
                                     if btn_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
                                     // Обычное состояние — не полная яркость (231/255), на hover —
@@ -1585,7 +1596,7 @@ impl eframe::App for App {
 
                                     ui.add_space(4.0 * t);
                                     let (clk_rect, clk_resp) = ui.allocate_exact_size(
-                                        vec2(15.0 * t, 15.0), Sense::click());
+                                        vec2(15.0 * t, 15.0 * t), Sense::click());
                                     let clk_hovered = clk_resp.hovered() && show_buttons;
                                     if clk_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
                                     let clk_base = if clk_hovered { 255 } else { 231 };
@@ -1603,7 +1614,7 @@ impl eframe::App for App {
 
                                     ui.add_space(4.0 * t);
                                     let (pen_rect, pen_resp) = ui.allocate_exact_size(
-                                        vec2(15.0 * t, 15.0), Sense::click());
+                                        vec2(15.0 * t, 15.0 * t), Sense::click());
                                     let pen_hovered = pen_resp.hovered() && show_buttons;
                                     if pen_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
                                     let pen_base = if pen_hovered { 255 } else { 231 };
@@ -1652,7 +1663,12 @@ impl eframe::App for App {
                                         // RichText::underline() — иначе цвет линии слипается
                                         // с цветом текста.
                                         let mut fmt = egui::text::TextFormat {
-                                            font_id: egui::FontId::proportional(13.0),
+                                            // Прозрачность не уменьшает размер текста — а нам
+                                            // нужно, чтобы перетаскиваемая строка не держала
+                                            // высоту вообще (как и кнопки выше). Схлопываем сам
+                                            // шрифт до почти нуля именно для неё.
+                                            font_id: egui::FontId::proportional(
+                                                if is_dragged_row { 1.0 } else { 13.0 }),
                                             color: text_color,
                                             ..Default::default()
                                         };
