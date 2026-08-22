@@ -75,6 +75,14 @@ static PENCIL_PNG: &[u8] = include_bytes!("../pics/pencil.png");
 /// Жёлтые часы — кнопка настройки routine у sub-задачи (сейчас временно
 /// использовала CROSS_PNG как заглушку).
 static CLOCK_PNG: &[u8] = include_bytes!("../pics/clock.png");
+// "_light" версии — забеленные копии тех же трёх иконок (сгенерированы
+// скриптом make_light_icons.py, альфа уже запечена в самом файле). Рисуются
+// поверх обычной иконки на hover — включаем/выключаем их видимость только
+// внешней альфой (0/255), а не наличием/отсутствием отрисовки (см. правило
+// про "Widget rect changed id between passes").
+static CROSS_LIGHT_PNG:  &[u8] = include_bytes!("../pics/cross_light.png");
+static CLOCK_LIGHT_PNG:  &[u8] = include_bytes!("../pics/clock_light.png");
+static PENCIL_LIGHT_PNG: &[u8] = include_bytes!("../pics/pencil_light.png");
 pub(crate) static ICON_PNG:  &[u8] = include_bytes!("../icon.png");
 
 // ── paths ─────────────────────────────────────────────────────────────────────
@@ -1390,19 +1398,24 @@ impl eframe::App for App {
             // или drag).
             let list_locked = self.editing_task.is_some() || self.dragging_task.is_some();
 
-            // Высота ScrollArea считается по РЕАЛЬНО отрисовываемым строкам —
-            // пока задача перетаскивается, её строка полностью пропускается
-            // (см. `continue` ниже), поэтому видимых строк на одну меньше.
-            let visible_rows = if self.dragging_task.is_some() {
-                display_order.len().saturating_sub(1)
-            } else {
-                display_order.len()
-            };
-            let scroll_h = visible_rows.min(9) as f32 * (ROW - 5.0);
+            // Высота ScrollArea — по ПОЛНОМУ числу строк, ВСЕГДА (не по
+            // "фактически видимых"). Раньше вычитали одну строку, пока идёт
+            // драг, но раз строка теперь не пропускается, а просто рисуется
+            // с высотой 0 (см. ниже) — реальная суммарная высота контента и
+            // не меняется, значит и scroll_h не должен.
+            let scroll_h = display_order.len().min(9) as f32 * (ROW - 5.0);
             // Реальные экранные прямоугольники строк (в display-порядке) —
             // нужны после цикла, чтобы по Y координате курсора найти щель
             // под белую полоску-индикатор и вычислить target для reorder_sub.
             let mut row_rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(display_order.len());
+            // Запоминаем исходный вертикальный item_spacing — его тоже нужно
+            // обнулять вокруг перетаскиваемой строки (см. ниже), иначе даже
+            // при высоте 0 между соседними строками остаётся фиксированный
+            // зазор ScrollArea, который сам по себе не зависит от высоты
+            // конкретного виджета — отсюда и "неполная" пустая строка.
+            let default_item_spacing_y = ui.spacing().item_spacing.y;
+            let default_interact_size  = ui.spacing().interact_size;
+            let mut prev_was_dragged = false;
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
@@ -1414,24 +1427,47 @@ impl eframe::App for App {
                         let is_editing  = self.editing_task == Some(real_i);
                         let is_dragged_row = self.dragging_task == Some(real_i);
 
-                        // Перетаскиваемая строка ПОЛНОСТЬЮ пропускается — не
-                        // просто невидима, а физически не занимает места, весь
-                        // список смыкается вокруг неё. Это безопасно (не
-                        // повторяет баг "Widget rect changed id between
-                        // passes"): is_dragged_row зависит только от
-                        // self.dragging_task — обычного состояния приложения,
-                        // неизменного в пределах одного кадра между двумя
-                        // internal-проходами egui (в отличие от show_buttons,
-                        // который зависел от текущей геометрии курсора и мог
-                        // "плыть" между проходами). Поэтому решение
-                        // рисовать/не рисовать тут стабильно на любом pass'е.
-                        if is_dragged_row { continue; }
+                        // Перетаскиваемая строка НЕ пропускается циклом (никакого
+                        // `continue`!) — вызовы push_id/allocate_ui_with_layout
+                        // происходят КАЖДЫЙ кадр для КАЖДОЙ строки, идентично.
+                        // "Схлопывание" делаем через высоту 0.0 у ЭТОЙ строки —
+                        // тот же приём, что и анимация кнопок (меняется только
+                        // число в vec2(), не факт вызова). Раньше строка просто
+                        // пропускалась через `continue`, что меняло СУММАРНУЮ
+                        // высоту контента ScrollArea между кадрами — а именно
+                        // это, судя по всему, и провоцирует egui перезапустить
+                        // internal pass (auto_shrink пересчитывает размер), из-за
+                        // чего мутация self.dragging_task — даже отложенная после
+                        // цикла — всё равно оказывалась видна "второму" pass'у
+                        // того же кадра. Если суммарная высота контента вообще
+                        // никогда не меняется, пересчитывать нечего — переезжать
+                        // между pass'ами нечему.
+                        let row_h = if is_dragged_row { 0.0 } else { ROW - 5.0 };
+
+                        // item_spacing тоже обнуляем — и ПЕРЕД этой строкой (если
+                        // она сама перетаскивается), и ПЕРЕД следующей (если
+                        // предыдущей была перетаскиваемая) — иначе зазор остаётся
+                        // с одной из двух сторон. Это чисто стилевая правка
+                        // (spacing не создаёт виджетов и не потребляет Id), так что
+                        // безопасна даже будучи завязанной на is_dragged_row.
+                        ui.spacing_mut().item_spacing.y =
+                            if is_dragged_row || prev_was_dragged { 0.0 } else { default_item_spacing_y };
+                        prev_was_dragged = is_dragged_row;
+                        // interact_size — минимальный размер, который egui может
+                        // подставлять под интерактивные виджеты, даже если явно
+                        // просишь меньше (например, у allocate_exact_size/
+                        // allocate_ui_with_layout есть свой floor на этот счёт).
+                        // Раз строка всё равно не кликабельна, пока перетаскивается
+                        // (list_locked), занулить его для неё безопасно и по
+                        // смыслу, и по структуре (тоже просто стиль, не виджет).
+                        ui.spacing_mut().interact_size =
+                            if is_dragged_row { egui::vec2(0.0, 0.0) } else { default_interact_size };
 
                         // Прямоугольник ВСЕЙ строки — вычисляем до отрисовки, чтобы
                         // без лага в кадр знать, наведён ли курсор именно на строку
                         // целиком (а не только когда текст под указателем).
                         let row_rect = egui::Rect::from_min_size(
-                            ui.cursor().min, vec2(self.w, ROW - 5.0));
+                            ui.cursor().min, vec2(self.w, row_h));
                         let row_hovered = ui.rect_contains_pointer(row_rect);
                         // Кнопки видны только на hover обычной строки; если строка
                         // сама редактируется — у неё всегда своя галочка (см. ниже);
@@ -1449,7 +1485,7 @@ impl eframe::App for App {
                         // убирает возможность коллизии.
                         let row_resp = ui.push_id(real_i, |ui| {
                         ui.allocate_ui_with_layout(
-                            vec2(self.w, ROW - 5.0),
+                            vec2(self.w, row_h),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 if is_editing {
@@ -1518,34 +1554,33 @@ impl eframe::App for App {
                                     // но структурно всё равно нарисован) — а не наличием/
                                     // отсутствием вызова, иначе снова ловим "Widget rect changed
                                     // id between passes" (тот самый баг с красными квадратами).
-                                    const HOVER_BLEACH_ALPHA: f32 = 255.0;
-                                    const BLEACH_LAYERS: u32 = 3;
+                                    // Забеленная версия рисуется поверх обычной иконки на
+                                    // hover — теперь это отдельный PNG-файл (cross_light.png
+                                    // и т.п.), где нужная альфа уже запечена в самом файле
+                                    // (см. make_light_icons.py), так что программно регулируем
+                                    // только "показать/спрятать" через альфу 0/255 — БЕЗУСЛОВНО
+                                    // рисуется каждый кадр, меняется только эта альфа, а не
+                                    // наличие вызова (см. правило про "Widget rect changed id
+                                    // between passes").
 
                                     ui.add_space(7.0 * t);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
                                         vec2(15.0 * t, 15.0), Sense::click());
                                     let btn_hovered = btn_resp.hovered() && show_buttons;
                                     if btn_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+                                    // Обычное состояние — не полная яркость (231/255), на hover —
+                                    // полная (255) плюс поверх ещё и light-иконка (см. ниже).
+                                    let btn_base = if btn_hovered { 255 } else { 231 };
                                     ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://cross.png".into(),
                                         bytes: CROSS_PNG.into(),
                                     }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
-                                        .tint(Color32::from_white_alpha((255.0 * t) as u8)));
-                                    let cross_bleach = if btn_hovered { HOVER_BLEACH_ALPHA } else { 0.0 };
-                                    // Несколько наложений подряд вместо одного — альфа
-                                    // итогового наложения ограничена собственной альфой
-                                    // пикселей PNG (tint умножает, не заменяет), так что один
-                                    // проход может не дотягивать до полностью белого, даже на
-                                    // максимальной константе. Каждый доп. слой (a-over-a)
-                                    // приближает результат к сплошной заливке. Все три
-                                    // безусловны, как и раньше — меняется только альфа.
-                                    for _ in 0..BLEACH_LAYERS {
-                                        ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
-                                            uri: "bytes://cross.png".into(),
-                                            bytes: CROSS_PNG.into(),
-                                        }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
-                                            .tint(Color32::from_white_alpha((cross_bleach * t) as u8)));
-                                    }
+                                        .tint(Color32::from_rgba_unmultiplied(btn_base, btn_base, btn_base, (255.0 * t) as u8)));
+                                    ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://cross_light.png".into(),
+                                        bytes: CROSS_LIGHT_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                        .tint(Color32::from_white_alpha(if btn_hovered { (255.0 * t) as u8 } else { 0 })));
                                     if show_buttons && btn_resp.clicked() { delete = Some(real_i); }
 
                                     ui.add_space(4.0 * t);
@@ -1553,19 +1588,17 @@ impl eframe::App for App {
                                         vec2(15.0 * t, 15.0), Sense::click());
                                     let clk_hovered = clk_resp.hovered() && show_buttons;
                                     if clk_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+                                    let clk_base = if clk_hovered { 255 } else { 231 };
                                     ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://clock.png".into(),
                                         bytes: CLOCK_PNG.into(),
                                     }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
-                                        .tint(Color32::from_white_alpha((255.0 * t) as u8)));
-                                    let clk_bleach = if clk_hovered { HOVER_BLEACH_ALPHA } else { 0.0 };
-                                    for _ in 0..BLEACH_LAYERS {
-                                        ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
-                                            uri: "bytes://clock.png".into(),
-                                            bytes: CLOCK_PNG.into(),
-                                        }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
-                                            .tint(Color32::from_white_alpha((clk_bleach * t) as u8)));
-                                    }
+                                        .tint(Color32::from_rgba_unmultiplied(clk_base, clk_base, clk_base, (255.0 * t) as u8)));
+                                    ui.put(clk_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://clock_light.png".into(),
+                                        bytes: CLOCK_LIGHT_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                        .tint(Color32::from_white_alpha(if clk_hovered { (255.0 * t) as u8 } else { 0 })));
                                     if show_buttons && clk_resp.clicked() { open_routine = Some(real_i); }
 
                                     ui.add_space(4.0 * t);
@@ -1573,19 +1606,17 @@ impl eframe::App for App {
                                         vec2(15.0 * t, 15.0), Sense::click());
                                     let pen_hovered = pen_resp.hovered() && show_buttons;
                                     if pen_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+                                    let pen_base = if pen_hovered { 255 } else { 231 };
                                     ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://pencil.png".into(),
                                         bytes: PENCIL_PNG.into(),
                                     }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
-                                        .tint(Color32::from_white_alpha((255.0 * t) as u8)));
-                                    let pen_bleach = if pen_hovered { HOVER_BLEACH_ALPHA } else { 0.0 };
-                                    for _ in 0..BLEACH_LAYERS {
-                                        ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
-                                            uri: "bytes://pencil.png".into(),
-                                            bytes: PENCIL_PNG.into(),
-                                        }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
-                                            .tint(Color32::from_white_alpha((pen_bleach * t) as u8)));
-                                    }
+                                        .tint(Color32::from_rgba_unmultiplied(pen_base, pen_base, pen_base, (255.0 * t) as u8)));
+                                    ui.put(pen_rect, egui::Image::new(ImageSource::Bytes {
+                                        uri: "bytes://pencil_light.png".into(),
+                                        bytes: PENCIL_LIGHT_PNG.into(),
+                                    }).fit_to_exact_size(vec2(8.0 * t, 8.0 * t))
+                                        .tint(Color32::from_white_alpha(if pen_hovered { (255.0 * t) as u8 } else { 0 })));
                                     if show_buttons && pen_resp.clicked() {
                                         start_edit = Some(real_i);
                                     }
