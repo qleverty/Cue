@@ -72,8 +72,7 @@ pub static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
 static TICK_SMALL_PNG: &[u8] = include_bytes!("../pics/tick_small.png");
 /// Карандаш — кнопка входа в режим инлайн-редактирования текста задачи.
 static PENCIL_PNG: &[u8] = include_bytes!("../pics/pencil.png");
-/// Жёлтые часы — кнопка настройки routine у sub-задачи (сейчас временно
-/// использовала CROSS_PNG как заглушку).
+/// Жёлтые часы — кнопка настройки routine у sub-задачи
 static CLOCK_PNG: &[u8] = include_bytes!("../pics/clock.png");
 // "_light" версии — забеленные копии тех же трёх иконок (сгенерированы
 // скриптом make_light_icons.py, альфа уже запечена в самом файле). Рисуются
@@ -1416,10 +1415,16 @@ impl eframe::App for App {
             let default_item_spacing_y = ui.spacing().item_spacing.y;
             let default_interact_size  = ui.spacing().interact_size;
             let mut prev_was_dragged = false;
+            // Видимая (обрезанная) область скролла — нужна и здесь (авто-скролл
+            // у края), и позже, после цикла (чтобы не рисовать белую полоску
+            // выше/ниже реальной зоны отрисовки subs — над разделителем или под
+            // списком, в зоне кнопки "Добавить...").
+            let mut scroll_viewport: Option<egui::Rect> = None;
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    scroll_viewport = Some(ui.clip_rect());
                     // Ручной скролл во время драга — и колёсиком, и у края списка.
                     // Штатную обработку колёсика ScrollArea НЕ трогаем (работает
                     // как обычно вне драга); добавляем СВОЙ путь, включаем только
@@ -1432,21 +1437,26 @@ impl eframe::App for App {
                             // Колёсико — читаем вручную и применяем сами (штатный
                             // путь ScrollArea, судя по всему, что-то блокирует
                             // во время активного Sense::drag() на дочернем
-                            // виджете).
+                            // виджете). Без множителя — у каждого своя скорость
+                            // колёсика в ОС, подстроить универсально всё равно
+                            // не выйдет, так что просто передаём как есть.
                             delta_y += ctx.input(|i| i.smooth_scroll_delta.y);
 
                             // Автоскролл у края видимой области — скорость растёт
                             // линейно от 0 (на границе зоны) до максимума (у
-                            // самого края), в обе стороны.
+                            // самого края), в обе стороны. EDGE_SCROLL_MULTIPLIER —
+                            // сюда крутить, если скорость авто-скролла у края
+                            // ощущается медленно/быстро.
                             const EDGE_ZONE: f32 = 20.0;
-                            const MAX_EDGE_SPEED: f32 = 300.0; // px/сек
+                            const MAX_EDGE_SPEED: f32 = 300.0; // px/сек, база
+                            const EDGE_SCROLL_MULTIPLIER: f32 = 2.0;
                             let dt = ctx.input(|i| i.stable_dt);
                             if pointer.y < viewport.top() + EDGE_ZONE {
                                 let depth = ((viewport.top() + EDGE_ZONE) - pointer.y).clamp(0.0, EDGE_ZONE);
-                                delta_y += (depth / EDGE_ZONE) * MAX_EDGE_SPEED * dt;
+                                delta_y += (depth / EDGE_ZONE) * MAX_EDGE_SPEED * EDGE_SCROLL_MULTIPLIER * dt;
                             } else if pointer.y > viewport.bottom() - EDGE_ZONE {
                                 let depth = (pointer.y - (viewport.bottom() - EDGE_ZONE)).clamp(0.0, EDGE_ZONE);
-                                delta_y -= (depth / EDGE_ZONE) * MAX_EDGE_SPEED * dt;
+                                delta_y -= (depth / EDGE_ZONE) * MAX_EDGE_SPEED * EDGE_SCROLL_MULTIPLIER * dt;
                             }
 
                             if delta_y != 0.0 {
@@ -1824,6 +1834,15 @@ impl eframe::App for App {
                                 line_y = rect.top();
                                 break;
                             }
+                        }
+                        // Линия не должна залезать выше разделителя или ниже
+                        // реально отрисованной зоны subs (там уже начинается
+                        // "Добавить...") — такое может произойти, если ближайшая
+                        // щель приходится на строку, физически прокрученную за
+                        // пределы видимой области. Прижимаем к границам видимого
+                        // viewport'а ScrollArea.
+                        if let Some(viewport) = scroll_viewport {
+                            line_y = line_y.clamp(viewport.top(), viewport.bottom());
                         }
                         ui.painter().hline(0.0..=self.w, line_y, (0.41, SEP));
                         if pointer_released {
