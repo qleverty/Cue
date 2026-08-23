@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use eframe::egui::{self, Color32, RichText, Sense, vec2};
+use eframe::egui::{self, Color32, ImageSource, RichText, Sense, vec2};
 
 use crate::sync::{
     discovery,
@@ -9,6 +9,14 @@ use crate::sync::{
     PeerStatus,
     SyncHandle,
 };
+
+// ── assets ────────────────────────────────────────────────────────────────────
+
+static DESKTOP_PNG: &[u8] = include_bytes!("../../../pics/desktop.png");
+
+/// Ограничение на длину имени устройства (в символах — char_limit у egui
+/// считает именно символы, не байты, так что кириллица не режется криво).
+const DEVICE_NAME_MAX_CHARS: usize = 32;
 
 // ── state ─────────────────────────────────────────────────────────────────────
 
@@ -62,8 +70,6 @@ pub fn draw(
             draw_peers(ui, sync);
             sep(ui);
             draw_discovery(ui, state, sync);
-            sep(ui);
-            draw_sync_now(ui, sync);
         });
 
     false
@@ -109,9 +115,14 @@ fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sy
     block_title(ui, "Это устройство");
 
     ui.horizontal(|ui| {
-        // Icon placeholder — replaced with a PNG in a later step.
         let (rect, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
         ui.painter().rect_filled(rect, 6.0, Color32::from_white_alpha(15));
+        let icon_size = vec2(16.0, 16.0);
+        let icon_rect = egui::Rect::from_center_size(rect.center(), icon_size);
+        ui.put(icon_rect, egui::Image::new(ImageSource::Bytes {
+            uri: "bytes://desktop.png".into(),
+            bytes: DESKTOP_PNG.into(),
+        }).fit_to_exact_size(icon_size).tint(Color32::from_white_alpha(200)));
         ui.add_space(10.0);
 
         ui.vertical(|ui| {
@@ -120,6 +131,7 @@ fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sy
                     .font(egui::FontId::proportional(13.0))
                     .text_color(Color32::from_white_alpha(210))
                     .frame(egui::Frame::NONE)
+                    .char_limit(DEVICE_NAME_MAX_CHARS)
                     .desired_width(f32::INFINITY),
             );
             if resp.lost_focus() {
@@ -317,31 +329,6 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
     }
 }
 
-fn draw_sync_now(ui: &mut egui::Ui, sync: &mut SyncHandle) {
-    let last_sync = sync.shared.peers.read().unwrap()
-        .all().iter()
-        .filter_map(|p| p.last_synced_at)
-        .max();
-
-    let time_text = match last_sync {
-        Some(ts) => format!("Синхронизирован {}", format_ago(ts)),
-        None     => "Нет данных о синхронизации".to_owned(),
-    };
-
-    ui.horizontal(|ui| {
-        ui.label(
-            RichText::new(time_text)
-                .size(10.5)
-                .color(Color32::from_white_alpha(64)),
-        );
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if btn(ui, "Синхронизировать", false).clicked() {
-                sync.shared.ping_tx.try_send(()).ok();
-            }
-        });
-    });
-}
-
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String, bool) {
@@ -383,7 +370,7 @@ fn sep(ui: &mut egui::Ui) {
 
 fn block_title(ui: &mut egui::Ui, text: &str) {
     ui.label(
-        RichText::new(text.to_uppercase())
+        RichText::new(text)
             .size(10.0)
             .color(Color32::from_white_alpha(64)),
     );
@@ -393,7 +380,7 @@ fn block_title(ui: &mut egui::Ui, text: &str) {
 /// Variant of `block_title` without bottom spacing — used in horizontal rows.
 fn block_title_inline(ui: &mut egui::Ui, text: &str) {
     ui.label(
-        RichText::new(text.to_uppercase())
+        RichText::new(text)
             .size(10.0)
             .color(Color32::from_white_alpha(64)),
     );
