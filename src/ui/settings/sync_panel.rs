@@ -411,6 +411,7 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
             "device_id":   our_id,
             "device_name": our_name,
             "token":       token,
+            "device_type": "desktop",
         }).to_string();
         let req = format!(
             "POST /1/request_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -442,6 +443,7 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
         token:          req.token.clone(),
         ip_hint:        Some(req.from_ip.clone()),
         last_synced_at: None,
+        device_type:    req.device_type,
     };
     sync.shared.peers.write().unwrap().add(entry);
     reject_pairing(sync, &req.device_id);
@@ -462,6 +464,7 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
             "device_name": our_name,
             "token":       token,
             "from_ip":     ip,
+            "device_type": "desktop",
         }).to_string();
         let http = format!(
             "POST /1/accept_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

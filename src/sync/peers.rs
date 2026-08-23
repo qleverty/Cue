@@ -11,6 +11,7 @@ pub struct PeerEntry {
     /// Unix timestamp (seconds) of the last successful op-pull from this peer.
     #[serde(default)]
     pub last_synced_at: Option<u64>,
+    pub device_type: super::DeviceType,
 }
 
 pub struct Peers {

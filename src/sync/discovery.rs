@@ -1,6 +1,9 @@
 use std::net::UdpSocket;
 use std::sync::{Arc, Mutex, RwLock, mpsc};
 use std::time::Duration;
+use serde::{Deserialize, Serialize};
+
+use super::DeviceType;
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
@@ -8,8 +11,19 @@ use std::time::Duration;
 pub struct DiscoveredPeer {
     pub device_id:   String,
     pub device_name: String,
+    pub device_type: DeviceType,
     pub ip:          String,
     seen_at:         u64,
+}
+
+enum DiscoveryKind { Ping, Pong }
+
+#[derive(Serialize, Deserialize)]
+struct DiscoveryMsg {
+    kind:        DiscoveryKind,
+    device_id:   String,
+    device_name: String,
+    device_type: DeviceType,
 }
 
 pub type DiscoveredList = Arc<Mutex<Vec<DiscoveredPeer>>>;
@@ -22,7 +36,7 @@ const READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Discovery {
     pub discovered: DiscoveredList,
-    /// Send () to trigger a CUE_PING broadcast from the listener socket.
+    /// Send () to trigger a discovery ping broadcast from the listener socket.
     ping_tx: mpsc::SyncSender<()>,
 }
 
@@ -36,6 +50,7 @@ pub fn start(
     our_device_id:   String,
     our_device_name: Arc<RwLock<String>>,
     local_ip:        Option<String>,
+    our_device_type: DeviceType,
 ) -> Discovery {
     let discovered: DiscoveredList = Arc::new(Mutex::new(Vec::new()));
     let discovered_clone           = Arc::clone(&discovered);
@@ -44,7 +59,7 @@ pub fn start(
 
     std::thread::Builder::new()
         .name("cue-discovery".into())
-        .spawn(move || run(our_device_id, our_device_name, discovered_clone, ping_rx, broadcast))
+        .spawn(move || run(our_device_id, our_device_name, our_device_type, discovered_clone, ping_rx, broadcast))
         .expect("spawn discovery thread");
 
     Discovery { discovered, ping_tx }
@@ -65,6 +80,7 @@ pub fn current(list: &DiscoveredList) -> Vec<DiscoveredPeer> {
 fn run(
     our_id:    String,
     our_name:  Arc<RwLock<String>>,
+    our_type:  DeviceType,
     list:      DiscoveredList,
     ping_rx:   mpsc::Receiver<()>,
     broadcast: String,
@@ -79,11 +95,17 @@ fn run(
         // Check if a ping was requested — send from this socket so replies
         // come back to port 52683 where we're already listening.
         if ping_rx.try_recv().is_ok() {
-            let our_name_str = our_name.read().unwrap().clone();
-            let msg = format!("CUE_PING {our_id} {our_name_str}");
-            match sock.send_to(msg.as_bytes(), format!("{broadcast}:{UDP_PORT}")) {
-                Ok(_)  => crate::clog!("[discovery] sent CUE_PING"),
-                Err(e) => crate::clog!("[discovery] send_ping failed: {e}"),
+            let msg = DiscoveryMsg {
+                kind:        DiscoveryKind::Ping,
+                device_id:   our_id.clone(),
+                device_name: our_name.read().unwrap().clone(),
+                device_type: our_type,
+            };
+            if let Ok(bytes) = serde_json::to_vec(&msg) {
+                match sock.send_to(&bytes, format!("{broadcast}:{UDP_PORT}")) {
+                    Ok(_)  => crate::clog!("[discovery] sent PING"),
+                    Err(e) => crate::clog!("[discovery] send_ping failed: {e}"),
+                }
             }
         }
 
@@ -97,38 +119,38 @@ fn run(
             }
         };
 
-        let msg = match std::str::from_utf8(&buf[..len]) {
-            Ok(s)  => s.trim(),
+        let msg: DiscoveryMsg = match serde_json::from_slice(&buf[..len]) {
+            Ok(m)  => m,
             Err(_) => continue,
         };
 
         let src_ip = src.ip().to_string();
 
-        if let Some(rest) = msg.strip_prefix("CUE_PING ") {
-            let (peer_id, peer_name) = match split_id_name(rest) {
-                Some(v) => v,
-                None    => continue,
-            };
-            crate::clog!("[discovery] got CUE_PING from {peer_id} @ {src_ip}");
+        match msg.kind {
+            DiscoveryKind::Ping => {
+                crate::clog!("[discovery] got PING from {} @ {src_ip}", msg.device_id);
 
-            // Reply with PONG from this same socket (port 52683).
-            let our_name_str = our_name.read().unwrap().clone();
-            let pong = format!("CUE_PONG {our_id} {our_name_str}");
-            let _ = sock.send_to(pong.as_bytes(), src);
+                // Reply with PONG from this same socket (port 52683).
+                let pong = DiscoveryMsg {
+                    kind:        DiscoveryKind::Pong,
+                    device_id:   our_id.clone(),
+                    device_name: our_name.read().unwrap().clone(),
+                    device_type: our_type,
+                };
+                if let Ok(bytes) = serde_json::to_vec(&pong) {
+                    let _ = sock.send_to(&bytes, src);
+                }
 
-            if peer_id != our_id {
-                upsert(&list, peer_id, peer_name, src_ip);
+                if msg.device_id != our_id {
+                    upsert(&list, msg.device_id, msg.device_name, msg.device_type, src_ip);
+                }
             }
+            DiscoveryKind::Pong => {
+                crate::clog!("[discovery] got PONG from {} @ {src_ip}", msg.device_id);
 
-        } else if let Some(rest) = msg.strip_prefix("CUE_PONG ") {
-            let (peer_id, peer_name) = match split_id_name(rest) {
-                Some(v) => v,
-                None    => continue,
-            };
-            crate::clog!("[discovery] got CUE_PONG from {peer_id} @ {src_ip}");
-
-            if peer_id != our_id {
-                upsert(&list, peer_id, peer_name, src_ip);
+                if msg.device_id != our_id {
+                    upsert(&list, msg.device_id, msg.device_name, msg.device_type, src_ip);
+                }
             }
         }
     }
@@ -164,28 +186,22 @@ fn bind_socket() -> Option<UdpSocket> {
     Some(sock)
 }
 
-fn split_id_name(s: &str) -> Option<(String, String)> {
-    let mut parts = s.splitn(2, ' ');
-    let id   = parts.next()?.trim().to_owned();
-    let name = parts.next().unwrap_or("Unknown").trim().to_owned();
-    if id.is_empty() { return None; }
-    Some((id, name))
-}
-
-fn upsert(list: &DiscoveredList, id: String, name: String, ip: String) {
+fn upsert(list: &DiscoveredList, id: String, name: String, device_type: DeviceType, ip: String) {
     let now = crate::project::current_time();
     let mut guard = list.lock().unwrap();
     match guard.iter_mut().find(|p| p.device_id == id) {
         Some(existing) => {
             existing.device_name = name;
+            existing.device_type = device_type;
             existing.ip          = ip;
             existing.seen_at     = now;
         }
         None => guard.push(DiscoveredPeer {
-            device_id:   id,
+            device_id: id,
             device_name: name,
+            device_type,
             ip,
-            seen_at:     now,
+            seen_at: now,
         }),
     }
 }

@@ -75,6 +75,17 @@ pub fn ensure_oplog_ready(dir: &Path, state: &Mutex<OplogState>) {
 
 // ── Sync status types ─────────────────────────────────────────────────────────
 
+pub enum DeviceType {
+    Desktop,
+    Phone,
+    #[serde(other)]
+    Unknown,
+}
+
+impl Default for DeviceType {
+    fn default() -> Self { DeviceType::Unknown }
+}
+
 #[derive(Clone, Default)]
 pub struct PeerStatus {
     pub online:  bool,
@@ -190,6 +201,7 @@ impl SyncHandle {
             identity.device_id.clone(),
             Arc::new(RwLock::new(identity.device_name.clone())),
             local_ip.clone(),
+            DeviceType::Desktop,
         );
         crate::clog!("[sync] discovery started");
 

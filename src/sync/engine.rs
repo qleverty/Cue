@@ -110,21 +110,25 @@ fn pull_all(
                     let hello_url = format!("http://{ip}:{}/1/hello", super::server::PORT);
                     if let Ok(body) = http_get(&hello_url, HTTP_TIMEOUT) {
                         #[derive(serde::Deserialize)]
-                        struct Hello { device_name: String }
+                        struct Hello { device_name: String, #[serde(default)] device_type: super::DeviceType }
                         if let Ok(h) = serde_json::from_str::<Hello>(&body) {
                             let mut peers = state.peers.write().unwrap();
-                            let name_changed = peers.list_mut()
+                            let changed = peers.list_mut()
                                 .find(|p| p.device_id == peer.device_id)
                                 .map(|p| {
+                                    let mut changed = false;
                                     if p.device_name != h.device_name {
                                         p.device_name = h.device_name;
-                                        true
-                                    } else {
-                                        false
+                                        changed = true;
                                     }
+                                    if p.device_type != h.device_type {
+                                        p.device_type = h.device_type;
+                                        changed = true;
+                                    }
+                                    changed
                                 })
                                 .unwrap_or(false);
-                            if name_changed { peers.save(); }
+                            if changed { peers.save(); }
                         }
                     }
                 }

@@ -72,7 +72,8 @@ pub static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
 static TICK_SMALL_PNG: &[u8] = include_bytes!("../pics/tick_small.png");
 /// Карандаш — кнопка входа в режим инлайн-редактирования текста задачи.
 static PENCIL_PNG: &[u8] = include_bytes!("../pics/pencil.png");
-/// Жёлтые часы — кнопка настройки routine у sub-задачи
+/// Жёлтые часы — кнопка настройки routine у sub-задачи (сейчас временно
+/// использовала CROSS_PNG как заглушку).
 static CLOCK_PNG: &[u8] = include_bytes!("../pics/clock.png");
 // "_light" версии — забеленные копии тех же трёх иконок (сгенерированы
 // скриптом make_light_icons.py, альфа уже запечена в самом файле). Рисуются
@@ -1449,7 +1450,7 @@ impl eframe::App for App {
                             // ощущается медленно/быстро.
                             const EDGE_ZONE: f32 = 20.0;
                             const MAX_EDGE_SPEED: f32 = 300.0; // px/сек, база
-                            const EDGE_SCROLL_MULTIPLIER: f32 = 2.0;
+                            const EDGE_SCROLL_MULTIPLIER: f32 = 1.0;
                             let dt = ctx.input(|i| i.stable_dt);
                             if pointer.y < viewport.top() + EDGE_ZONE {
                                 let depth = ((viewport.top() + EDGE_ZONE) - pointer.y).clamp(0.0, EDGE_ZONE);

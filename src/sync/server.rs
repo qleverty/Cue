@@ -9,7 +9,7 @@ use eframe::egui;
 use serde::{Deserialize, Serialize};
 use tiny_http::{Method, Request, Response, Server, StatusCode};
 
-use super::{oplog::Op, peers::Peers, OplogState};
+use super::{oplog::Op, peers::Peers, DeviceType, OplogState};
 
 pub const PORT:      u16 = 52684;
 pub const PROTO_VER: u32 = 1;
@@ -42,6 +42,8 @@ pub struct PairingRequest {
     pub device_name: String,
     pub token:       String,
     pub from_ip:     String,
+    #[serde(default)]
+    pub device_type: DeviceType,
 }
 
 // ── start ─────────────────────────────────────────────────────────────────────
@@ -119,11 +121,12 @@ fn handle(req: Request, state: &SharedState) {
 
 fn hello(req: Request, state: &SharedState) {
     #[derive(Serialize)]
-    struct Hello<'a> { proto_ver: u32, device_id: &'a str, device_name: String }
+    struct Hello<'a> { proto_ver: u32, device_id: &'a str, device_name: String, device_type: DeviceType }
     let body = serde_json::to_string(&Hello {
         proto_ver:   PROTO_VER,
         device_id:   &state.device_id,
         device_name: state.device_name.read().unwrap().clone(),
+        device_type: DeviceType::Desktop,
     })
     .unwrap_or_default();
     respond_json(req, 200, &body);
@@ -149,7 +152,7 @@ fn serve_ops(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
 
 fn request_sync(mut req: Request, state: &SharedState) {
     #[derive(Deserialize)]
-    struct Body { device_id: String, device_name: String, token: String }
+    struct Body { device_id: String, device_name: String, token: String, #[serde(default)] device_type: DeviceType }
 
     let mut buf = String::new();
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
@@ -168,6 +171,7 @@ fn request_sync(mut req: Request, state: &SharedState) {
             device_name: b.device_name,
             token:       b.token,
             from_ip,
+            device_type: b.device_type,
         });
         save_pending_pairings(state.oplog_path.parent().unwrap_or(std::path::Path::new(".")), &pending);
     }
@@ -178,7 +182,7 @@ fn request_sync(mut req: Request, state: &SharedState) {
 
 fn accept_sync(mut req: Request, state: &SharedState) {
     #[derive(Deserialize)]
-    struct Body { device_id: String, device_name: String, token: String, from_ip: String }
+    struct Body { device_id: String, device_name: String, token: String, from_ip: String, #[serde(default)] device_type: DeviceType }
 
     let mut buf = String::new();
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
@@ -192,6 +196,7 @@ fn accept_sync(mut req: Request, state: &SharedState) {
         token:          b.token,
         ip_hint:        Some(b.from_ip),
         last_synced_at: None,
+        device_type:    b.device_type,
     };
     state.peers.write().unwrap().add(entry);
     state.ping_tx.try_send(()).ok();
