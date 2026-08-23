@@ -1420,6 +1420,41 @@ impl eframe::App for App {
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
+                    // Ручной скролл во время драга — и колёсиком, и у края списка.
+                    // Штатную обработку колёсика ScrollArea НЕ трогаем (работает
+                    // как обычно вне драга); добавляем СВОЙ путь, включаем только
+                    // пока dragging_task активен, чтобы не задвоить скролл.
+                    if let Some(pointer) = drag_pointer {
+                        if self.dragging_task.is_some() {
+                            let viewport = ui.clip_rect();
+                            let mut delta_y = 0.0_f32;
+
+                            // Колёсико — читаем вручную и применяем сами (штатный
+                            // путь ScrollArea, судя по всему, что-то блокирует
+                            // во время активного Sense::drag() на дочернем
+                            // виджете).
+                            delta_y += ctx.input(|i| i.smooth_scroll_delta.y);
+
+                            // Автоскролл у края видимой области — скорость растёт
+                            // линейно от 0 (на границе зоны) до максимума (у
+                            // самого края), в обе стороны.
+                            const EDGE_ZONE: f32 = 20.0;
+                            const MAX_EDGE_SPEED: f32 = 300.0; // px/сек
+                            let dt = ctx.input(|i| i.stable_dt);
+                            if pointer.y < viewport.top() + EDGE_ZONE {
+                                let depth = ((viewport.top() + EDGE_ZONE) - pointer.y).clamp(0.0, EDGE_ZONE);
+                                delta_y += (depth / EDGE_ZONE) * MAX_EDGE_SPEED * dt;
+                            } else if pointer.y > viewport.bottom() - EDGE_ZONE {
+                                let depth = (pointer.y - (viewport.bottom() - EDGE_ZONE)).clamp(0.0, EDGE_ZONE);
+                                delta_y -= (depth / EDGE_ZONE) * MAX_EDGE_SPEED * dt;
+                            }
+
+                            if delta_y != 0.0 {
+                                ui.scroll_with_delta(vec2(0.0, delta_y));
+                            }
+                        }
+                    }
+
                     for (real_i, task_text, is_active, has_routine) in display_order.iter() {
                         let real_i      = *real_i;
                         let is_active   = *is_active;
