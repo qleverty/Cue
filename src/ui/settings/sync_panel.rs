@@ -14,12 +14,15 @@ use crate::sync::{
 
 static DESKTOP_PNG: &[u8] = include_bytes!("../../../pics/desktop.png");
 
+/// Ограничение на длину имени устройства (в символах — char_limit у egui
+/// считает именно символы, не байты, так что кириллица не режется криво).
 const DEVICE_NAME_MAX_CHARS: usize = 32;
 
 // ── state ─────────────────────────────────────────────────────────────────────
 
 pub enum ScanState {
     Idle,
+    /// Active scan; `started_at` drives the dot animation.
     Scanning { started_at: Instant },
     Results(Vec<discovery::DiscoveredPeer>),
     Empty,
@@ -31,6 +34,7 @@ impl Default for ScanState {
 
 pub struct SyncPanelState {
     pub scan_state:    ScanState,
+    /// Mirrors `sync.identity.device_name` for the editable name field.
     device_name_buf:   String,
     name_initialized:  bool,
 }
@@ -137,6 +141,7 @@ fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sy
                     sync.identity.device_name                 = trimmed;
                     sync.identity.save(&crate::app_dir());
                 } else {
+                    // Revert to saved name if the field was cleared.
                     state.device_name_buf = sync.identity.device_name.clone();
                 }
             }
@@ -198,6 +203,7 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
                     );
                     if dis.hovered() {
                         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        // Overdraw with brighter color on hover.
                         ui.painter().text(
                             dis.rect.center(),
                             egui::Align2::CENTER_CENTER,
@@ -238,6 +244,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
     });
     ui.add_space(4.0);
 
+    // Evaluate transition before borrowing scan_state for drawing.
     let should_finish = if let ScanState::Scanning { started_at } = &state.scan_state {
         started_at.elapsed().as_secs_f32() >= 1.8
     } else {
@@ -245,6 +252,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
     };
     if should_finish {
         let found = crate::sync::discovery::current(&sync.shared.discovered.discovered);
+        // Filter out already-paired peers.
         let paired_ids: std::collections::HashSet<_> = sync.shared.peers
             .read().unwrap()
             .all().iter()
@@ -312,11 +320,23 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
+/// Три видимых состояния (цвет самого статус-текста — точку убрали):
+/// - revoked (403 от пира)            → красный, "Отвязано"
+/// - online (последний пул успешен)   → зелёный, время последнего синка
+/// - всё остальное (offline/error/ещё не опрашивали) → серый, "Оффлайн" или
+///   "Ожидание…" (только для свежепривязанного устройства, синка ещё не
+///   было — единственный случай, когда текст в сером состоянии отличается).
+/// status.error намеренно не проверяем отдельно — свежий обрыв соединения
+/// визуально неотличим от простого оффлайна, пользователю эта разница не
+/// нужна (см. обсуждение).
 fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
     if status.revoked {
         return (Color32::from_rgb(200, 45, 45), "Отвязано".to_owned());
     }
     if status.online {
+        // "online, но ни разу не синхронизировались" физически недостижимо —
+        // engine.rs выставляет online и last_synced_at всегда вместе — но
+        // .unwrap_or_else оставляем как защитный fallback, а не unwrap().
         let text = peer.last_synced_at
             .map(format_ago)
             .unwrap_or_else(|| "ожидание…".to_owned());
@@ -358,6 +378,7 @@ fn block_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
 }
 
+/// Variant of `block_title` without bottom spacing — used in horizontal rows.
 fn block_title_inline(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
@@ -386,6 +407,8 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     )
 }
 
+/// Token is derived deterministically from both device IDs so both sides
+/// independently compute the same value — avoids conflicts if both initiate.
 fn deterministic_token(id_a: &str, id_b: &str) -> String {
     let (lo, hi) = if id_a < id_b { (id_a, id_b) } else { (id_b, id_a) };
     format!("{lo}:{hi}")
@@ -400,6 +423,7 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
     let token    = deterministic_token(&our_id, &peer.device_id);
     let our_name = sync.shared.device_name.read().unwrap().clone();
 
+    // POST /request_sync to the peer in a background thread.
     // NOTE: we do NOT add to trusted_peers yet — only after the peer accepts
     // and we receive /accept_sync will we register them.
     let ip      = peer.ip.clone();
@@ -433,10 +457,12 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
         }
     });
 
+    // Wake engine for immediate pull attempt.
     sync.shared.ping_tx.try_send(()).ok();
 }
 
 fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
+    // Add the initiator to our trusted peers.
     let entry = PeerEntry {
         device_id:      req.device_id.clone(),
         device_name:    req.device_name.clone(),
@@ -449,6 +475,7 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
     reject_pairing(sync, &req.device_id);
     sync.shared.ping_tx.try_send(()).ok();
 
+    // Notify the initiator so they can add us to their trusted_peers.
     let ip       = req.from_ip.clone();
     let our_id   = sync.shared.device_id.clone();
     let our_name = sync.shared.device_name.read().unwrap().clone();

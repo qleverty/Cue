@@ -75,6 +75,13 @@ pub fn ensure_oplog_ready(dir: &Path, state: &Mutex<OplogState>) {
 
 // ── Sync status types ─────────────────────────────────────────────────────────
 
+/// Тип устройства — сейчас используется только в протоколе (discovery/hello/
+/// pairing), в UI пока нигде не отображается (задел под будущую иконку в
+/// списке устройств). `Unknown` — и дефолт для уже сохранённых на диске
+/// записей без этого поля, и fallback при разборе незнакомого будущего
+/// значения (см. `#[serde(other)]`).
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DeviceType {
     Desktop,
     Phone,

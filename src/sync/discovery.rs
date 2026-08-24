@@ -16,6 +16,12 @@ pub struct DiscoveredPeer {
     seen_at:         u64,
 }
 
+/// Wire-формат UDP discovery-пакета — JSON целиком (раньше был самодельный
+/// plaintext "CUE_PING id name", в который было некуда безопасно дописать
+/// новое поле: имя забирало "всё до конца строки"). Обратную совместимость
+/// с этим старым форматом сознательно не сохраняем.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum DiscoveryKind { Ping, Pong }
 
 #[derive(Serialize, Deserialize)]

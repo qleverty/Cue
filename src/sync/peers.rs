@@ -11,6 +11,10 @@ pub struct PeerEntry {
     /// Unix timestamp (seconds) of the last successful op-pull from this peer.
     #[serde(default)]
     pub last_synced_at: Option<u64>,
+    /// Обновляется на каждом успешном пуле через /1/hello (см. engine.rs) —
+    /// пир может сменить платформу/переустановиться, так что не считаем
+    /// зафиксированным раз и навсегда, как token.
+    #[serde(default)]
     pub device_type: super::DeviceType,
 }
 
