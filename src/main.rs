@@ -535,9 +535,15 @@ impl App {
         self.last_routine_tick = now;
 
         for proj in &mut self.projects {
+            let mut changed = false;
+
             // main: рутина там в норме уже active=true (см. раздел 1 плана —
             // "не может быть неактивной и в main"), но проверяем защитно,
-            // без репозиционирования (main — всегда 0/1 элемент).
+            // без репозиционирования (main — всегда 0/1 элемент). Раньше эта
+            // ветка не выставляла `changed`, из-за чего активация здесь не
+            // сохранялась на диск — теперь это реальный путь (например,
+            // после применения входящего SetRoutine с сети), так что
+            // пишем наравне с subs.
             for task in proj.main.values_mut() {
                 if let Some(routine) = task.routine.as_mut() {
                     if !routine.active {
@@ -549,6 +555,7 @@ impl App {
                             if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
                                 notify::send(&task.text, &proj.name, &proj.color_hex);
                             }
+                            changed = true;
                         }
                     }
                 }
@@ -558,7 +565,6 @@ impl App {
             // order_key и физическая позиция задачи не меняются никогда при
             // активации. Группировка active/inactive для показа считается
             // отдельно, на лету, при отрисовке (см. display_order в update()).
-            let mut changed = false;
             for task in proj.subs.values_mut() {
                 let Some(routine) = task.routine.as_mut() else { continue };
                 if !routine.active {
