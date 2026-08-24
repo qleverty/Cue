@@ -90,6 +90,10 @@ pub struct TaskData {
     pub created_at: u64,
     #[serde(default)]
     pub order_key:  f64,
+    #[serde(default)]
+    pub text_edited_at:    u64,
+    #[serde(default)]
+    pub routine_edited_at: u64,
 }
 
 /// Эффективно активна ли задача (для сортировки/выбора следующей main).
@@ -134,6 +138,54 @@ pub struct LoadedProject {
 }
 
 impl LoadedProject {
+    /// Единая точка применения правки текста задачи — и для локального
+    /// действия пользователя, и для входящего сетевого опа. LWW по `ts`:
+    /// применяется, только если `ts` строго новее уже сохранённого
+    /// `text_edited_at`, иначе тихо игнорируется (более старая правка,
+    /// пришедшая с опозданием, не должна затирать более свежую).
+    pub fn apply_edit_task(&mut self, task_id: &str, text: &str, ts: u64) -> bool {
+        let Some(t) = self.main.get_mut(task_id).or_else(|| self.subs.get_mut(task_id)) else {
+            return false;
+        };
+        if ts <= t.text_edited_at { return false; }
+        t.text = text.to_owned();
+        t.text_edited_at = ts;
+        true
+    }
+
+    /// Единая точка применения нового расписания рутины — и для локальной
+    /// правки в редакторе, и для входящего сетевого опа. LWW по `ts` на
+    /// сам факт правки расписания (`routine_edited_at`), но `active`/
+    /// `last_triggered_at` НИКОГДА не берутся из входящих данных напрямую —
+    /// это локально вычисляемая производная: подставляем уже имеющийся
+    /// локальный `last_triggered_at` поверх присланного расписания и сразу
+    /// пересчитываем due, чтобы не открыть заново уже обработанные локально
+    /// вхождения и не разминуться с уведомлением при активации.
+    pub fn apply_set_routine(&mut self, task_id: &str, mut routine: Option<Routine>, ts: u64) -> bool {
+        let Some(t) = self.main.get_mut(task_id).or_else(|| self.subs.get_mut(task_id)) else {
+            return false;
+        };
+        if ts <= t.routine_edited_at { return false; }
+        t.routine_edited_at = ts;
+
+        if let Some(r) = routine.as_mut() {
+            r.last_triggered_at = t.routine.as_ref().map(|old| old.last_triggered_at).unwrap_or(0);
+            let now = crate::routine_scheduler::local_now();
+            if let Some(occ) = crate::routine_scheduler::due_occurrence(r, now) {
+                r.active = true;
+                r.last_triggered_at = now;
+                crate::routine_scheduler::prune_expired_direct(r, now);
+                if now.saturating_sub(occ) <= crate::routine_scheduler::NOTIFY_WINDOW_SECS {
+                    crate::notify::send(&t.text, &self.name, &self.color_hex);
+                }
+            } else {
+                r.active = false;
+            }
+        }
+        t.routine = routine;
+        true
+    }
+
     pub fn has_active_routine(&self) -> bool {
         self.main.values().chain(self.subs.values())
             .any(|t| t.routine.as_ref().is_some_and(|r| r.active))
@@ -201,7 +253,10 @@ impl LoadedProject {
     }
 
     pub fn add_task(&mut self, id: String, text: String, s: &Settings) {
-        let mut task = TaskData { text, routine: None, created_at: current_time(), order_key: 0.0 };
+        let mut task = TaskData {
+            text, routine: None, created_at: current_time(), order_key: 0.0,
+            text_edited_at: current_time(), routine_edited_at: 0,
+        };
 
         if self.main.is_empty() {
             self.main.insert(id, task);

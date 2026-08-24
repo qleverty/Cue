@@ -501,18 +501,14 @@ impl App {
 
         let idx     = self.active_project_idx;
         let task_id = self.routine_ui.task_id.clone();
+        let ts      = project::current_time();
 
         let _ = self.sync.record_op(sync::oplog::OpKind::SetRoutine {
             project_id: self.projects[idx].id.clone(),
             task_id:    task_id.clone(),
             routine:    routine.clone(),
         });
-        let proj = &mut self.projects[idx];
-        if let Some(task) = proj.main.get_mut(task_id.as_str()) {
-            task.routine = routine;
-        } else if let Some(task) = proj.subs.get_mut(task_id.as_str()) {
-            task.routine = routine;
-        }
+        self.projects[idx].apply_set_routine(&task_id, routine, ts);
         self.projects[idx].save();
     }
 
@@ -804,7 +800,10 @@ impl eframe::App for App {
                             });
                             self.projects[idx].main.insert(
                                 task_id,
-                                project::TaskData { text: first, routine: None, created_at: ts, order_key: 0.0 },
+                                project::TaskData {
+                                    text: first, routine: None, created_at: ts, order_key: 0.0,
+                                    text_edited_at: ts, routine_edited_at: 0,
+                                },
                             );
                         }
                         for text in iter {
@@ -1775,13 +1774,14 @@ impl eframe::App for App {
                         if !new_text.is_empty() && old_text.as_deref() != Some(new_text.as_str()) {
                             if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
                                 let task_id = task_id.clone();
+                                let ts = project::current_time();
                                 let _ = self.sync.record_op(sync::oplog::OpKind::EditTask {
                                     project_id: self.projects[idx].id.clone(),
-                                    task_id,
-                                    text: new_text.clone(),
+                                    task_id:    task_id.clone(),
+                                    text:       new_text.clone(),
                                 });
+                                self.projects[idx].apply_edit_task(&task_id, &new_text, ts);
                             }
-                            self.projects[idx].edit_sub(i, new_text);
                             self.projects[idx].save();
                         }
                     }

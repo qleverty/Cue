@@ -65,6 +65,7 @@ pub fn apply_op(
             let task = TaskData {
                 text: text.clone(), routine: None,
                 created_at: op.ts, order_key: 0.0,
+                text_edited_at: op.ts, routine_edited_at: 0,
             };
             match target {
                 AddTarget::Main => {
@@ -116,9 +117,7 @@ pub fn apply_op(
             if tombstones.deleted_at(project_id)
                 .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
             let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            let task = proj.main.get_mut(task_id.as_str())
-                .or_else(|| proj.subs.get_mut(task_id.as_str()))?;
-            task.routine = routine.clone();
+            if !proj.apply_set_routine(task_id, routine.clone(), op.ts) { return None; }
             Some(project_id.clone())
         }
         OpKind::PromoteTask { project_id, task_id } => {
@@ -132,9 +131,7 @@ pub fn apply_op(
             if tombstones.deleted_at(project_id)
                 .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
             let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            let t = proj.main.get_mut(task_id.as_str())
-                .or_else(|| proj.subs.get_mut(task_id.as_str()))?;
-            t.text = text.clone();
+            if !proj.apply_edit_task(task_id, text, op.ts) { return None; }
             Some(project_id.clone())
         }
 
