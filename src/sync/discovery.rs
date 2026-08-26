@@ -16,10 +16,6 @@ pub struct DiscoveredPeer {
     seen_at:         u64,
 }
 
-/// Wire-формат UDP discovery-пакета — JSON целиком (раньше был самодельный
-/// plaintext "CUE_PING id name", в который было некуда безопасно дописать
-/// новое поле: имя забирало "всё до конца строки"). Обратную совместимость
-/// с этим старым форматом сознательно не сохраняем.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum DiscoveryKind { Ping, Pong }
@@ -42,7 +38,6 @@ const READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Discovery {
     pub discovered: DiscoveredList,
-    /// Send () to trigger a discovery ping broadcast from the listener socket.
     ping_tx: mpsc::SyncSender<()>,
 }
 
@@ -71,7 +66,6 @@ pub fn start(
     Discovery { discovered, ping_tx }
 }
 
-/// Read the current non-expired discovered peers.
 pub fn current(list: &DiscoveredList) -> Vec<DiscoveredPeer> {
     let now = crate::project::current_time();
     list.lock().unwrap()
@@ -91,15 +85,20 @@ fn run(
     ping_rx:   mpsc::Receiver<()>,
     broadcast: String,
 ) {
-    let sock = match bind_socket() {
-        Some(s) => s,
-        None    => return,
+    const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+
+    let sock = loop {
+        match bind_socket() {
+            Some(s) => break s,
+            None => {
+                crate::clog!("[discovery] bind failed, retry in {BIND_RETRY_INTERVAL:?}");
+                std::thread::sleep(BIND_RETRY_INTERVAL);
+            }
+        }
     };
 
     let mut buf = [0u8; 512];
     loop {
-        // Check if a ping was requested — send from this socket so replies
-        // come back to port 52683 where we're already listening.
         if ping_rx.try_recv().is_ok() {
             let msg = DiscoveryMsg {
                 kind:        DiscoveryKind::Ping,
@@ -136,7 +135,6 @@ fn run(
             DiscoveryKind::Ping => {
                 crate::clog!("[discovery] got PING from {} @ {src_ip}", msg.device_id);
 
-                // Reply with PONG from this same socket (port 52683).
                 let pong = DiscoveryMsg {
                     kind:        DiscoveryKind::Pong,
                     device_id:   our_id.clone(),
@@ -164,8 +162,6 @@ fn run(
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Derive the subnet broadcast from a local IP, assuming /24.
-/// Falls back to 255.255.255.255 if the IP can't be parsed.
 fn subnet_broadcast(local_ip: Option<&str>) -> String {
     let ip = match local_ip {
         Some(s) => s,

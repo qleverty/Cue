@@ -36,7 +36,6 @@ impl Cursors {
         self.save();
     }
 
-    /// Minimum cursor across all peers — safe compaction boundary.
     pub fn min_cursor(&self) -> u64 {
         self.inner.cursors.values().copied().min().unwrap_or(0)
     }
