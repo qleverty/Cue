@@ -381,6 +381,7 @@ impl App {
                         subs:       indexmap::IndexMap::new(),
                         created_at: 0, // временная заглушка — см. project.rs, load_active_with_fallback
                         loaded:     false,
+                        main_edited_at: 0,
                     }
                 })
                 .collect();
@@ -798,12 +799,13 @@ impl eframe::App for App {
                                 text:       first.clone(),
                                 target:     sync::oplog::AddTarget::Main,
                             });
-                            self.projects[idx].main.insert(
+                            self.projects[idx].apply_add_to_main(
                                 task_id,
                                 project::TaskData {
                                     text: first, routine: None, created_at: ts, order_key: 0.0,
                                     text_edited_at: ts, routine_edited_at: 0,
                                 },
+                                ts,
                             );
                         }
                         for text in iter {
@@ -1282,11 +1284,12 @@ impl eframe::App for App {
             if tick_resp.clicked() {
                 let idx = self.active_project_idx;
                 if let Some(task_id) = self.projects[idx].main.keys().next().cloned() {
-                    let _ = self.sync.record_op(sync::oplog::OpKind::CompleteMain {
+                    let now = routine_scheduler::local_now();
+                    let _ = self.sync.record_op(sync::oplog::OpKind::CompleteTask {
                         project_id: self.projects[idx].id.clone(),
-                        task_id,
+                        task_id:    task_id.clone(),
                     });
-                    self.projects[idx].complete_main(routine_scheduler::local_now());
+                    self.projects[idx].complete_task(&task_id, now, project::current_time());
                     self.projects[idx].save();
                 } else if let Some(pos) = self.projects[idx].subs.iter()
                     .position(|(_, t)| project::is_active_task(t))
@@ -1297,10 +1300,11 @@ impl eframe::App for App {
                     // просто ничего не делать.
                     let task_id    = self.projects[idx].subs.get_index(pos).unwrap().0.clone();
                     let project_id = self.projects[idx].id.clone();
+                    let ts         = project::current_time();
                     let _ = self.sync.record_op(sync::oplog::OpKind::PromoteTask {
-                        project_id, task_id,
+                        project_id, task_id: task_id.clone(),
                     });
-                    self.projects[idx].promote_sub(pos);
+                    self.projects[idx].apply_promote_task(&task_id, ts);
                     self.projects[idx].save();
                 }
             }
@@ -1862,13 +1866,15 @@ impl eframe::App for App {
 
             if let Some(i) = promote {
                 if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
+                    let task_id = task_id.clone();
+                    let ts      = project::current_time();
                     let _ = self.sync.record_op(sync::oplog::OpKind::PromoteTask {
                         project_id: self.projects[idx].id.clone(),
                         task_id:    task_id.clone(),
                     });
+                    self.projects[idx].apply_promote_task(&task_id, ts);
+                    self.projects[idx].save();
                 }
-                self.projects[idx].promote_sub(i);
-                self.projects[idx].save();
             }
             if let Some(i) = open_routine {
                 let idx = self.active_project_idx;
@@ -1893,11 +1899,11 @@ impl eframe::App for App {
                     // двигается: остаётся ровно там же, физически.
                     let task_id    = self.projects[idx].subs.get_index(i).unwrap().0.clone();
                     let project_id = self.projects[idx].id.clone();
-                    let ts         = project::current_time();
-                    let _          = self.sync.record_op(sync::oplog::OpKind::CompleteSub {
-                        project_id, task_id,
+                    let now        = routine_scheduler::local_now();
+                    let _          = self.sync.record_op(sync::oplog::OpKind::CompleteTask {
+                        project_id, task_id: task_id.clone(),
                     });
-                    self.projects[idx].complete_sub_routine(i, ts);
+                    self.projects[idx].complete_task(&task_id, now, project::current_time());
                 } else {
                     // Обычная задача, либо уже неактивная рутина — реальное
                     // удаление, как раньше.

@@ -69,12 +69,7 @@ pub fn apply_op(
             };
             match target {
                 AddTarget::Main => {
-                    if !proj.main.is_empty() {
-                        let (old_id, mut old) = proj.main.shift_remove_index(0).unwrap();
-                        old.order_key = proj.next_end_key();
-                        proj.subs.insert(old_id, old);
-                    }
-                    proj.main.insert(task_id.clone(), task);
+                    proj.apply_add_to_main(task_id.clone(), task, op.ts);
                 }
                 AddTarget::End => {
                     let mut t = task; t.order_key = proj.next_end_key();
@@ -95,22 +90,14 @@ pub fn apply_op(
             proj.main.shift_remove(task_id.as_str());
             Some(project_id.clone())
         }
-        OpKind::CompleteMain { project_id, task_id } => {
+        OpKind::CompleteTask { project_id, task_id } => {
             if tombstones.deleted_at(project_id).is_some() { return None; }
             let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if !proj.main.contains_key(task_id.as_str()) { return None; }
-            // op.ts — момент, когда завершение реально произошло на исходном
-            // устройстве; используем его же для проверки "все ли direct-даты
-            // рутины уже прошли" (см. раздел 5.2/7.1 плана — намеренное
-            // упрощение вместо отдельного сравнения меток).
-            proj.complete_main(op.ts);
-            Some(project_id.clone())
-        }
-        OpKind::CompleteSub { project_id, task_id } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            let idx = proj.subs.get_index_of(task_id.as_str())?;
-            proj.complete_sub_routine(idx, op.ts);
+            // op.ts используется и для проверки исчерпания direct-дат, и
+            // для main_edited_at — на входящем опе оба совпадают, точного
+            // локального времени исходного устройства для пересчёта дат
+            // всё равно нет (намеренное упрощение, см. project.rs).
+            if !proj.complete_task(task_id, op.ts, op.ts) { return None; }
             Some(project_id.clone())
         }
         OpKind::SetRoutine { project_id, task_id, routine } => {
@@ -123,8 +110,7 @@ pub fn apply_op(
         OpKind::PromoteTask { project_id, task_id } => {
             if tombstones.deleted_at(project_id).is_some() { return None; }
             let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            let i = proj.subs.get_index_of(task_id.as_str())?;
-            proj.promote_sub(i);
+            if !proj.apply_promote_task(task_id, op.ts) { return None; }
             Some(project_id.clone())
         }
         OpKind::EditTask { project_id, task_id, text } => {

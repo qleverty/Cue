@@ -25,13 +25,13 @@ pub enum OpKind {
     AddTask        { project_id: String, task_id: String, text: String, target: AddTarget },
     #[serde(rename = "DELETE_TASK")]
     DeleteTask     { project_id: String, task_id: String },
-    #[serde(rename = "COMPLETE_MAIN")]
-    CompleteMain   { project_id: String, task_id: String },
-    /// Досрочное завершение рутины прямо в subs (крестик по активной рутине
-    /// = "сделал без main"), без промоушена следующей задачи и без
-    /// перемещения по списку.
-    #[serde(rename = "COMPLETE_SUB")]
-    CompleteSub    { project_id: String, task_id: String },
+    /// Завершение задачи — ищется и в main, и в subs (не важно, откуда
+    /// пришёл клик: main-слот или крестик по активной рутине в subs).
+    /// Обычная задача — удаляется. Задача с рутиной — деактивируется
+    /// (и переносится в subs, если была в main) либо удаляется целиком,
+    /// если рутина полностью исчерпана. См. LoadedProject::complete_task.
+    #[serde(rename = "COMPLETE_TASK")]
+    CompleteTask   { project_id: String, task_id: String },
     #[serde(rename = "PROMOTE_TASK")]
     PromoteTask    { project_id: String, task_id: String },
     #[serde(rename = "EDIT_TASK")]
@@ -59,8 +59,7 @@ impl OpKind {
             OpKind::RecolorProject { project_id, .. } => Some(project_id),
             OpKind::AddTask        { project_id, .. } => Some(project_id),
             OpKind::DeleteTask     { project_id, .. } => Some(project_id),
-            OpKind::CompleteMain   { project_id, .. } => Some(project_id),
-            OpKind::CompleteSub    { project_id, .. } => Some(project_id),
+            OpKind::CompleteTask   { project_id, .. } => Some(project_id),
             OpKind::PromoteTask    { project_id, .. } => Some(project_id),
             OpKind::EditTask       { project_id, .. } => Some(project_id),
             OpKind::SetRoutine     { project_id, .. } => Some(project_id),
@@ -125,8 +124,7 @@ impl OpLog {
             OpKind::RecolorProject { .. } => "RECOLOR_PROJECT",
             OpKind::AddTask        { .. } => "ADD_TASK",
             OpKind::DeleteTask     { .. } => "DELETE_TASK",
-            OpKind::CompleteMain   { .. } => "COMPLETE_MAIN",
-            OpKind::CompleteSub    { .. } => "COMPLETE_SUB",
+            OpKind::CompleteTask   { .. } => "COMPLETE_TASK",
             OpKind::PromoteTask    { .. } => "PROMOTE_TASK",
             OpKind::EditTask       { .. } => "EDIT_TASK",
             OpKind::SetRoutine     { .. } => "SET_ROUTINE",

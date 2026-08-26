@@ -118,6 +118,8 @@ struct ProjectFile {
     last_edited: u64,
     #[serde(default)]
     created_at:  u64,
+    #[serde(default)]
+    main_edited_at: u64,
 }
 
 pub struct LoadedProject {
@@ -135,6 +137,10 @@ pub struct LoadedProject {
     /// чтобы решить — доверять батчу целиком (false) или скипнуть
     /// (true, уже реальные данные).
     pub loaded:     bool,
+    /// LWW-регистр "кто занимает main" — конкурируют PromoteTask и
+    /// AddTask{target: Main}, а также авто-заполнение main внутри
+    /// complete_task (см. apply_promote_task/apply_add_to_main ниже).
+    pub main_edited_at: u64,
 }
 
 impl LoadedProject {
@@ -161,6 +167,37 @@ impl LoadedProject {
     /// локальный `last_triggered_at` поверх присланного расписания и сразу
     /// пересчитываем due, чтобы не открыть заново уже обработанные локально
     /// вхождения и не разминуться с уведомлением при активации.
+    /// LWW-регистр "кто занимает main". Применяется, только если `ts`
+    /// строго новее уже сохранённого `main_edited_at` — иначе более старый,
+    /// задержавшийся в пути промоушен не должен вытеснять то, что уже
+    /// заняло слот позже по факту (см. обсуждение гонки PromoteTask/
+    /// CompleteTask). Общий метод для локального клика и входящего опа.
+    pub fn apply_promote_task(&mut self, task_id: &str, ts: u64) -> bool {
+        if ts <= self.main_edited_at { return false; }
+        let Some(i) = self.subs.get_index_of(task_id) else { return false; };
+        self.promote_sub(i);
+        self.main_edited_at = ts;
+        true
+    }
+
+    /// То же самое для AddTask{target: Main} — но здесь задача создаётся
+    /// с нуля, поэтому проигрыш гонки за main не должен приводить к потере
+    /// самой задачи: она просто уходит в конец subs вместо main.
+    pub fn apply_add_to_main(&mut self, task_id: String, mut task: TaskData, ts: u64) {
+        if ts > self.main_edited_at {
+            if !self.main.is_empty() {
+                let (old_id, mut old) = self.main.shift_remove_index(0).unwrap();
+                old.order_key = self.next_end_key();
+                self.subs.insert(old_id, old);
+            }
+            self.main.insert(task_id, task);
+            self.main_edited_at = ts;
+        } else {
+            task.order_key = self.next_end_key();
+            self.subs.insert(task_id, task);
+        }
+    }
+
     pub fn apply_set_routine(&mut self, task_id: &str, mut routine: Option<Routine>, ts: u64) -> bool {
         let Some(t) = self.main.get_mut(task_id).or_else(|| self.subs.get_mut(task_id)) else {
             return false;
@@ -169,7 +206,14 @@ impl LoadedProject {
         t.routine_edited_at = ts;
 
         if let Some(r) = routine.as_mut() {
-            r.last_triggered_at = t.routine.as_ref().map(|old| old.last_triggered_at).unwrap_or(0);
+            // Тройной фолбэк: своя история (если задача уже существовала
+            // локально) → присланная в опе (bootstrap с реальным устройством-
+            // источником) → ноль (совсем новая задача без истории вообще).
+            // Не путать с "доверять чужому active/last_triggered_at
+            // напрямую" — due всё равно пересчитывается заново ниже, это
+            // только выбор точки отсчёта.
+            r.last_triggered_at = t.routine.as_ref().map(|old| old.last_triggered_at)
+                .unwrap_or(r.last_triggered_at);
             let now = crate::routine_scheduler::local_now();
             if let Some(occ) = crate::routine_scheduler::due_occurrence(r, now) {
                 r.active = true;
@@ -198,6 +242,7 @@ impl LoadedProject {
             subs:       IndexMap::new(),
             created_at,
             loaded:     true,
+            main_edited_at: 0,
         }
     }
 
@@ -216,6 +261,7 @@ impl LoadedProject {
             },
             last_edited: current_time(),
             created_at:  self.created_at,
+            main_edited_at: self.main_edited_at,
         };
         let path = projects_dir().join(format!("{}.json", self.id));
         let tmp  = projects_dir().join(format!("{}.json.tmp", self.id));
@@ -260,11 +306,13 @@ impl LoadedProject {
 
         if self.main.is_empty() {
             self.main.insert(id, task);
+            self.main_edited_at = current_time();
             return;
         }
         if s.replace_main {
             let (old_id, mut old_task) = self.main.shift_remove_index(0).unwrap();
             self.main.insert(id, task);
+            self.main_edited_at = current_time();
             match s.new_task_pos {
                 NewTaskPos::End => {
                     old_task.order_key = self.next_end_key();
@@ -289,44 +337,74 @@ impl LoadedProject {
         }
     }
 
-    /// `now` — момент выполнения (см. раздел 2.4/5.2 плана: для локального
-    /// клика передаётся routine_scheduler::local_now(), для входящего по
-    /// сети CompleteMain-опа — op.ts самого опа).
-    pub fn complete_main(&mut self, now: u64) {
-        let Some((id, mut task)) = self.main.shift_remove_index(0) else { return; };
+    /// `now` — момент выполнения: для локального клика передаётся
+    /// routine_scheduler::local_now(), для входящего по сети CompleteTask-
+    /// опа — op.ts самого опа.
+    /// Единая точка завершения задачи — не важно, откуда пришёл вызов:
+    /// клик по main-слоту или крестик по активной рутине в subs. Ищет
+    /// `task_id` сначала в main, потом в subs, применяет поведение по месту
+    /// находки. Обычная задача — удаляется. Задача с рутиной — гасится
+    /// (active=false) либо удаляется целиком, если рутина исчерпана.
+    ///
+    /// Важно: если задача найдена уже в subs — НЕ трогаем order_key и
+    /// физическую позицию (мутация на месте), физический порядок важен
+    /// для отображения в "плоском" режиме. Из main же выход в subs — это
+    /// всегда новая запись (позиции раньше не было, терять нечего).
+    pub fn complete_task(&mut self, task_id: &str, now: u64, main_ts: u64) -> bool {
+        if self.main.contains_key(task_id) {
+            let (id, mut task) = self.main.shift_remove_entry(task_id).unwrap();
+            if let Some(routine) = task.routine.as_mut() {
+                crate::routine_scheduler::prune_expired_direct(routine, now);
+                let exhausted = routine.week.is_none()
+                    && routine.month.is_none()
+                    && routine.direct.as_ref().map_or(true, |d| d.is_empty());
+                if !exhausted {
+                    routine.active = false;
+                    task.order_key = self.next_end_key();
+                    self.subs.insert(id, task); // физический конец; display-порядок группирует отдельно
+                }
+                // exhausted — задача просто никуда не возвращается
+            }
+            // task.routine было None — обычная задача, просто пропадает
 
-        if let Some(routine) = task.routine.as_mut() {
-            // Чистка исчерпанных direct-записей. Основной вызов — уже при
-            // АКТИВАЦИИ (main.rs::routine_tick), здесь — идемпотентная
-            // подстраховка на случай, если что-то не почистилось раньше
-            // (например задачу вручную вставили в main без активации).
+            // Продвигаем в main первую ЭФФЕКТИВНО АКТИВНУЮ sub-задачу (группа
+            // active всегда идёт перед not-active благодаря компаратору
+            // сортировки в load_all_projects/insert — см. is_active_task).
+            // position() — защитная подстраховка на случай рассинхрона
+            // сортировки.
+            if let Some(pos) = self.subs.iter().position(|(_, t)| is_active_task(t)) {
+                let (next_id, next_task) = self.subs.shift_remove_index(pos).unwrap();
+                self.main.insert(next_id, next_task);
+                self.main_edited_at = main_ts; // UTC, не local_now — тот же базис, что у Promote/AddTask
+            }
+            return true;
+        }
+
+        if self.subs.contains_key(task_id) {
+            let has_routine = self.subs.get(task_id).is_some_and(|t| t.routine.is_some());
+            if !has_routine {
+                self.subs.shift_remove(task_id); // обычная задача в subs — просто удаляется
+                return true;
+            }
+            let routine = self.subs.get_mut(task_id).unwrap().routine.as_mut().unwrap();
             crate::routine_scheduler::prune_expired_direct(routine, now);
-
-            // Исчерпана целиком, только если это был "чистый" Direct
-            // (нет week/month вообще) и все даты уже прошли/стёрты.
             let exhausted = routine.week.is_none()
                 && routine.month.is_none()
                 && routine.direct.as_ref().map_or(true, |d| d.is_empty());
-
-            if !exhausted {
-                routine.active = false;
-                task.order_key = self.next_end_key();
-                self.subs.insert(id, task); // физический конец; display-порядок группирует отдельно
+            if exhausted {
+                // Тумбстоун не нужен: результат детерминирован из уже
+                // синканных entries + ts, каждое устройство придёт к тому
+                // же выводу само.
+                self.subs.shift_remove(task_id);
+            } else {
+                // НЕ трогаем order_key и физическую позицию — задача
+                // остаётся ровно там же, просто гаснет.
+                self.subs.get_mut(task_id).unwrap().routine.as_mut().unwrap().active = false;
             }
-            // если exhausted — задача просто никуда не возвращается (удалена
-            // фактом невставки обратно, как обычная выполненная задача)
+            return true;
         }
-        // если task.routine было None — обычная задача, старое поведение:
-        // просто пропадает, ничего не вставляем обратно.
 
-        // Продвигаем в main первую ЭФФЕКТИВНО АКТИВНУЮ sub-задачу (группа
-        // active всегда идёт перед not-active благодаря компаратору сортировки
-        // в load_all_projects/insert — см. is_active_task). position() —
-        // защитная подстраховка на случай рассинхрона сортировки.
-        if let Some(pos) = self.subs.iter().position(|(_, t)| is_active_task(t)) {
-            let (next_id, next_task) = self.subs.shift_remove_index(pos).unwrap();
-            self.main.insert(next_id, next_task);
-        }
+        false
     }
 
     pub fn promote_sub(&mut self, i: usize) {
@@ -392,36 +470,6 @@ impl LoadedProject {
         self.subs.shift_insert(target, id, task);
     }
 
-    /// Досрочное завершение рутины прямо в subs (крестик по активной
-    /// рутине). В отличие от complete_main — никого никуда не двигаем и не
-    /// продвигаем: задача и так уже была в subs, просто гасим active.
-    /// Возвращает true, если что-то реально поменялось (был вызов не
-    /// на обычной задаче/уже неактивной — для них этот метод не должен
-    /// вызываться вовсе, но на всякий случай защищаемся).
-    pub fn complete_sub_routine(&mut self, i: usize, now: u64) -> bool {
-        let Some((id, task)) = self.subs.get_index(i) else { return false; };
-        if task.routine.is_none() { return false; }
-        let id = id.clone();
-
-        let routine = self.subs.get_mut(&id).unwrap().routine.as_mut().unwrap();
-        crate::routine_scheduler::prune_expired_direct(routine, now);
-        let exhausted = routine.week.is_none()
-            && routine.month.is_none()
-            && routine.direct.as_ref().map_or(true, |d| d.is_empty());
-
-        if exhausted {
-            // Полностью исчерпанная direct-рутина — удаляется целиком, как
-            // и в complete_main. Тумбстоун не нужен: результат детерминирован
-            // из уже синканных entries + ts, каждое устройство придёт к
-            // тому же выводу само (см. обсуждение 2026-08-02).
-            self.subs.shift_remove(&id);
-        } else {
-            // НЕ трогаем order_key и физическую позицию — задача остаётся
-            // ровно там же, просто гаснет.
-            self.subs.get_mut(&id).unwrap().routine.as_mut().unwrap().active = false;
-        }
-        true
-    }
 }
 
 /// Синхронно читает и парсит ОДИН файл проекта по id. None — файл
@@ -443,6 +491,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
         subs:       file.tasks.subs,
         created_at: file.created_at,
         loaded:     true,
+        main_edited_at: file.main_edited_at,
     })
 }
 
@@ -510,6 +559,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 subs:       file.tasks.subs,
                 created_at: file.created_at,
                 loaded:     true,
+                main_edited_at: file.main_edited_at,
             };
             // Физический порядок subs больше не пересортировывается —
             // хранится как в файле. Группировка active/inactive для показа
