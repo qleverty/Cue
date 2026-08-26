@@ -381,7 +381,7 @@ impl App {
                         subs:       indexmap::IndexMap::new(),
                         created_at: 0, // временная заглушка — см. project.rs, load_active_with_fallback
                         loaded:     false,
-                        main_edited_at: 0,
+                        main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
                     }
                 })
                 .collect();

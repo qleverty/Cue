@@ -120,6 +120,10 @@ struct ProjectFile {
     created_at:  u64,
     #[serde(default)]
     main_edited_at: u64,
+    #[serde(default)]
+    name_edited_at:  u64,
+    #[serde(default)]
+    color_edited_at: u64,
 }
 
 pub struct LoadedProject {
@@ -141,6 +145,12 @@ pub struct LoadedProject {
     /// AddTask{target: Main}, а также авто-заполнение main внутри
     /// complete_task (см. apply_promote_task/apply_add_to_main ниже).
     pub main_edited_at: u64,
+    /// LWW-метки для RenameProject/RecolorProject — только приёмная сторона
+    /// в v2 (UI-отправки нет, появится в v2.1), нужны заранее ради
+    /// обратной совместимости: v2 уже должна уметь корректно принять такой
+    /// оп от будущего v2.1-устройства.
+    pub name_edited_at:  u64,
+    pub color_edited_at: u64,
 }
 
 impl LoadedProject {
@@ -242,7 +252,7 @@ impl LoadedProject {
             subs:       IndexMap::new(),
             created_at,
             loaded:     true,
-            main_edited_at: 0,
+            main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
         }
     }
 
@@ -261,7 +271,7 @@ impl LoadedProject {
             },
             last_edited: current_time(),
             created_at:  self.created_at,
-            main_edited_at: self.main_edited_at,
+            main_edited_at: self.main_edited_at, name_edited_at: self.name_edited_at, color_edited_at: self.color_edited_at,
         };
         let path = projects_dir().join(format!("{}.json", self.id));
         let tmp  = projects_dir().join(format!("{}.json.tmp", self.id));
@@ -491,7 +501,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
         subs:       file.tasks.subs,
         created_at: file.created_at,
         loaded:     true,
-        main_edited_at: file.main_edited_at,
+        main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
     })
 }
 
@@ -559,7 +569,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 subs:       file.tasks.subs,
                 created_at: file.created_at,
                 loaded:     true,
-                main_edited_at: file.main_edited_at,
+                main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
             };
             // Физический порядок subs больше не пересортировывается —
             // хранится как в файле. Группировка active/inactive для показа

@@ -43,15 +43,19 @@ pub fn apply_op(
         OpKind::RenameProject { project_id, name } => {
             if tombstones.deleted_at(project_id).is_some() { return None; }
             let p = projects.iter_mut().find(|p| &p.id == project_id)?;
+            if op.ts <= p.name_edited_at { return None; }
             p.name = name.clone();
+            p.name_edited_at = op.ts;
             Some(project_id.clone())
         }
         OpKind::RecolorProject { project_id, color } => {
             if tombstones.deleted_at(project_id).is_some() { return None; }
             let p = projects.iter_mut().find(|p| &p.id == project_id)?;
+            if op.ts <= p.color_edited_at { return None; }
             let c = hex_to_color32(color)?;
             p.color     = c;
             p.color_hex = color.clone();
+            p.color_edited_at = op.ts;
             Some(project_id.clone())
         }
 
@@ -123,15 +127,17 @@ pub fn apply_op(
 
         // ── settings ─────────────────────────────────────────────────────
         OpKind::SetSharedSetting { key, value } => {
+            let mut applied = false;
             match key.as_str() {
                 "new_task_pos" => if let Ok(v) = serde_json::from_value(value.clone()) {
-                    settings.new_task_pos = v; settings.save();
+                    applied = settings.apply_new_task_pos(v, op.ts);
                 },
                 "replace_main" => if let Ok(v) = serde_json::from_value(value.clone()) {
-                    settings.replace_main = v; settings.save();
+                    applied = settings.apply_replace_main(v, op.ts);
                 },
                 _ => {}
             }
+            if applied { settings.save(); }
             None
         }
     }

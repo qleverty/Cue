@@ -22,7 +22,11 @@ pub enum NewTaskPos {
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub new_task_pos:     NewTaskPos,
+    #[serde(default)]
+    pub new_task_pos_edited_at: u64,
     pub replace_main:     bool,
+    #[serde(default)]
+    pub replace_main_edited_at: u64,
     #[serde(default)]
     pub last_project_id:  Option<String>,
     #[serde(default)]
@@ -40,11 +44,32 @@ pub struct Settings {
 
 fn default_group_inactive() -> bool { true }
 
+impl Settings {
+    /// Единая точка применения — и для локального действия в UI, и для
+    /// входящего SetSharedSetting. LWW по `ts`: применяется, только если
+    /// строго новее уже сохранённого edited_at.
+    pub fn apply_new_task_pos(&mut self, value: NewTaskPos, ts: u64) -> bool {
+        if ts <= self.new_task_pos_edited_at { return false; }
+        self.new_task_pos = value;
+        self.new_task_pos_edited_at = ts;
+        true
+    }
+
+    pub fn apply_replace_main(&mut self, value: bool, ts: u64) -> bool {
+        if ts <= self.replace_main_edited_at { return false; }
+        self.replace_main = value;
+        self.replace_main_edited_at = ts;
+        true
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             new_task_pos:     NewTaskPos::End,
+            new_task_pos_edited_at: 0,
             replace_main:     false,
+            replace_main_edited_at: 0,
             last_project_id:  None,
             last_width:       None,
             last_pos:         None,
@@ -216,7 +241,7 @@ pub fn draw_settings_ui(
 
     match state.tab {
         SettingsTab::General  =>
-            { crate::ui::settings::general::draw(ui, settings); }
+            { crate::ui::settings::general::draw(ui, settings, sync); }
         SettingsTab::Projects =>
             { crate::ui::settings::projects::draw(ui); }
         SettingsTab::Sync     =>
