@@ -158,6 +158,11 @@ fn request_sync(mut req: Request, state: &SharedState) {
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
     let Ok(b) = serde_json::from_str::<Body>(&buf) else { respond(req, 400, ""); return; };
 
+    // Защита от пейринга с самим собой — в норме такого не должно случаться
+    // (discovery уже фильтрует свой же device_id из списка найденных), но
+    // это дёшево проверить отдельно, а не полагаться только на UI.
+    if b.device_id == state.device_id { respond(req, 400, ""); return; }
+
     // Already trusted → 200 (idempotent).
     if state.peers.read().unwrap().find_by_id(&b.device_id).is_some() {
         respond(req, 200, "{}"); return;
@@ -166,13 +171,24 @@ fn request_sync(mut req: Request, state: &SharedState) {
     let from_ip = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
     {
         let mut pending = state.pending_pairings.lock().unwrap();
-        pending.push(PairingRequest {
-            device_id:   b.device_id,
-            device_name: b.device_name,
-            token:       b.token,
-            from_ip,
-            device_type: b.device_type,
-        });
+        // Не плодим дубликаты, если это устройство уже прислало запрос
+        // и мы его ещё не приняли/отклонили (например, юзер несколько раз
+        // подряд нажал "Подключить") — просто обновляем данные на месте.
+        match pending.iter_mut().find(|p| p.device_id == b.device_id) {
+            Some(existing) => {
+                existing.device_name = b.device_name;
+                existing.token       = b.token;
+                existing.from_ip     = from_ip;
+                existing.device_type = b.device_type;
+            }
+            None => pending.push(PairingRequest {
+                device_id:   b.device_id,
+                device_name: b.device_name,
+                token:       b.token,
+                from_ip,
+                device_type: b.device_type,
+            }),
+        }
         save_pending_pairings(state.oplog_path.parent().unwrap_or(std::path::Path::new(".")), &pending);
     }
     // Wake egui so the pairing banner appears immediately.
@@ -182,19 +198,32 @@ fn request_sync(mut req: Request, state: &SharedState) {
 
 fn accept_sync(mut req: Request, state: &SharedState) {
     #[derive(Deserialize)]
-    struct Body { device_id: String, device_name: String, token: String, from_ip: String, #[serde(default)] device_type: DeviceType }
+    struct Body { device_id: String, device_name: String, token: String, #[serde(default)] device_type: DeviceType }
 
     let mut buf = String::new();
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
     let Ok(b) = serde_json::from_str::<Body>(&buf) else { respond(req, 400, ""); return; };
 
-    crate::clog!("[server] accept_sync from {} ip={}", b.device_id, b.from_ip);
+    if b.device_id == state.device_id { respond(req, 400, ""); return; }
+
+    // ВАЖНО: IP берём с самого TCP-соединения (req.remote_addr()), а НЕ из
+    // тела запроса. Раньше отправитель (клиент) сам присылал "from_ip" —
+    // и на его стороне эта переменная случайно оказывалась IP-адресом
+    // ПОЛУЧАТЕЛЯ (нас самих), а не своим собственным — из-за чего мы
+    // сохраняли пира с ip_hint, указывающим на самих себя, после чего
+    // движок синхронизации периодически опрашивал сам себя и затирал
+    // сохранённое имя пира собственным именем. Самостоятельно наблюдаемый
+    // адрес соединения тому же самому классу ошибок в принципе не
+    // подвержен — он физически не может быть перепутан с чужим.
+    let from_ip = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+
+    crate::clog!("[server] accept_sync from {} ip={}", b.device_id, from_ip);
 
     let entry = super::peers::PeerEntry {
         device_id:      b.device_id,
         device_name:    b.device_name,
         token:          b.token,
-        ip_hint:        Some(b.from_ip),
+        ip_hint:        Some(from_ip),
         last_synced_at: None,
         device_type:    b.device_type,
     };

@@ -490,7 +490,6 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
             "device_id":   our_id,
             "device_name": our_name,
             "token":       token,
-            "from_ip":     ip,
             "device_type": "desktop",
         }).to_string();
         let http = format!(
