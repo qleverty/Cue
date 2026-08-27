@@ -2043,6 +2043,11 @@ impl eframe::App for App {
 // ── entry ─────────────────────────────────────────────────────────────────────
 
 fn main() -> eframe::Result<()> {
+    if std::env::args().any(|a| a == "--version") {
+        println!("{}", env!("CARGO_PKG_VERSION"));
+        std::process::exit(0);
+    }
+
     let _ = std::fs::create_dir_all(app_dir());
     // Init file logger before anything else — GUI apps have no console on Windows.
     LOG_PATH.set(app_dir().join("debug.log")).ok();
