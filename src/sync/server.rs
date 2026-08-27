@@ -78,7 +78,13 @@ fn bind_with_retry(port: u16) -> Server {
             Ok(listener) => match Server::from_listener(listener, None) {
                 Ok(server) => {
                     crate::clog!("[sync/server] bind SUCCEEDED on port {port}");
-                    PORT_BUSY_NOTIFIED.store(false, std::sync::atomic::Ordering::SeqCst);
+                    let was_notified = PORT_BUSY_NOTIFIED.swap(false, std::sync::atomic::Ordering::SeqCst);
+                    if was_notified {
+                        crate::notify::send_no_icon(
+                            &format!("Порт {port} освобождён"),
+                            "Синхронизация восстановлена",
+                        );
+                    }
                     return server;
                 }
                 Err(e) => crate::clog!("[sync/server] from_listener failed: {e:?}"),
@@ -86,10 +92,9 @@ fn bind_with_retry(port: u16) -> Server {
             Err(e) => crate::clog!("[sync/server] bind_exclusive failed: {e:?}"),
         }
         if !PORT_BUSY_NOTIFIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-            crate::notify::send(
-                &format!("Порт {port} занят"),
-                "Синхронизация заморожена",
-                "#DC3232",
+            crate::notify::send_no_icon(
+                &format!("Порт {port} занят другим приложением"),
+                "Синхронизация недоступна",
             );
         }
         if last_yield_sent.elapsed() >= Duration::from_millis(YIELD_RESEND_MS) {

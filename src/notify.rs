@@ -110,18 +110,33 @@ $notifier.Show($toast)
 
     pub fn send(title: &str, body: &str, color_hex: &str) {
         let icon = crate::icon_cache::icon_path_for(color_hex);
+        send_with_icon_path(title, body, Some(icon));
+    }
+
+    /// Без -IconPath вообще — флаг не передаётся, не просто передаётся
+    /// пустым значением (меньше риск странностей в биндинге параметров
+    /// PowerShell). $IconPath останется $null по умолчанию, скрипт это уже
+    /// учитывает (`if ($IconPath -and ...)`). Временный эксперимент —
+    /// проверить, годится ли системная иконка по умолчанию, прежде чем
+    /// городить отдельный ассет специально под предупреждения.
+    pub fn send_no_icon(title: &str, body: &str) {
+        send_with_icon_path(title, body, None);
+    }
+
+    fn send_with_icon_path(title: &str, body: &str, icon: Option<std::path::PathBuf>) {
         let script = script_path();
 
-        let result = Command::new("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
-                   "-WindowStyle", "Hidden", "-File"])
+        let mut cmd = Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+               "-WindowStyle", "Hidden", "-File"])
             .arg(script)
             .arg("-AumId").arg(AUMID)
             .arg("-Title").arg(title)
-            .arg("-Body").arg(body)
-            .arg("-IconPath").arg(&icon)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn();
+            .arg("-Body").arg(body);
+        if let Some(icon) = icon {
+            cmd.arg("-IconPath").arg(icon);
+        }
+        let result = cmd.creation_flags(CREATE_NO_WINDOW).spawn();
 
         if let Err(e) = result {
             crate::clog!("[notify] не удалось запустить powershell: {e}");
@@ -135,6 +150,9 @@ mod imp {
         // На остальных ОС уведомлений пока нет вовсе — рутина всё равно
         // активируется молча, как и раньше (см. обсуждение 2026-08-02).
     }
+
+    pub fn send_no_icon(_title: &str, _body: &str) {}
 }
 
 pub use imp::send;
+pub use imp::send_no_icon;
