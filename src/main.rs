@@ -408,7 +408,7 @@ impl App {
             })
             .expect("spawn routine thread");
 
-        let sync = sync::SyncHandle::init(&mut projects, cc.egui_ctx.clone());
+        let sync = sync::SyncHandle::init(&mut projects, cc.egui_ctx.clone(), settings.http_port);
 
         let actual_id = projects[active_idx].id.clone();
         if settings.last_project_id.as_deref() != Some(&actual_id) {

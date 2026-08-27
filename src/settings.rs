@@ -40,9 +40,15 @@ pub struct Settings {
     /// См. обсуждение 2026-08-02.
     #[serde(default = "default_group_inactive")]
     pub group_inactive_at_end: bool,
+    /// HTTP-порт синка. Значение настраивается программно (пока без UI —
+    /// см. RenameProject/RecolorProject для аналогичного паттерна), но
+    /// бэкенд уже полностью параметризован под него.
+    #[serde(default = "default_http_port")]
+    pub http_port: u16,
 }
 
 fn default_group_inactive() -> bool { true }
+fn default_http_port() -> u16 { crate::sync::server::DEFAULT_PORT }
 
 impl Settings {
     /// Единая точка применения — и для локального действия в UI, и для
@@ -74,6 +80,7 @@ impl Default for Settings {
             last_width:       None,
             last_pos:         None,
             group_inactive_at_end: true,
+            http_port: crate::sync::server::DEFAULT_PORT,
         }
     }
 }

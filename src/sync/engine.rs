@@ -95,7 +95,7 @@ fn pull_all(
             continue;
         };
         let since = cursors.lock().unwrap().get(&peer.device_id);
-        let url   = format!("http://{ip}:{}/1/ops?since={since}&token={}", super::server::PORT, peer.token);
+        let url   = format!("http://{ip}:{}/1/ops?since={since}&token={}", state.http_port, peer.token);
         crate::clog!("[engine] pulling from {} url={}", peer.device_id, url);
 
         let now_ts = SystemTime::now()
@@ -107,7 +107,7 @@ fn pull_all(
             Ok(body) => {
                 // Successful connection — update last_synced_at, name, ip and mark online.
                 {
-                    let hello_url = format!("http://{ip}:{}/1/hello", super::server::PORT);
+                    let hello_url = format!("http://{ip}:{}/1/hello", state.http_port);
                     if let Ok(body) = http_get(&hello_url, HTTP_TIMEOUT) {
                         #[derive(serde::Deserialize)]
                         struct Hello { device_name: String, #[serde(default)] device_type: super::DeviceType }
@@ -190,7 +190,7 @@ fn notify_peers(state: &SharedState) {
             crate::clog!("[notifier] skipping {} — no ip_hint", peer.device_id);
             continue;
         };
-        let url = format!("http://{ip}:{}/1/ping_sync?token={}", super::server::PORT, peer.token);
+        let url = format!("http://{ip}:{}/1/ping_sync?token={}", state.http_port, peer.token);
         match http_post(&url, NOTIFY_TIMEOUT) {
             Ok(_)  => crate::clog!("[notifier] ping_sync → {} ok", peer.device_id),
             Err(e) => crate::clog!("[notifier] ping_sync → {} FAILED: {e}", peer.device_id),

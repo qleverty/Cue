@@ -38,12 +38,25 @@ const READ_TIMEOUT: Duration = Duration::from_millis(500);
 
 pub struct Discovery {
     pub discovered: DiscoveredList,
+    /// None — сокет ещё не забинжен (идёт retry) либо был потерян и не
+    /// восстановился; Some(true) — забинжен и слушает нормально.
+    pub ready:      Arc<Mutex<bool>>,
+    /// Текст последней ошибки bind, для отображения в UI. Сбрасывается в
+    /// None сразу после успешного bind.
+    pub bind_error: Arc<Mutex<Option<String>>>,
     ping_tx: mpsc::SyncSender<()>,
 }
 
 impl Discovery {
     pub fn send_ping(&self) {
         self.ping_tx.try_send(()).ok();
+    }
+
+    /// Текст для UI при клике "Найти устройства": None — можно продолжать
+    /// как обычно (или показывать "устройства не найдены"), Some(msg) —
+    /// показать msg красным вместо результата поиска.
+    pub fn error_for_ui(&self) -> Option<String> {
+        if *self.ready.lock().unwrap() { None } else { self.bind_error.lock().unwrap().clone() }
     }
 }
 
@@ -57,13 +70,20 @@ pub fn start(
     let discovered_clone           = Arc::clone(&discovered);
     let (ping_tx, ping_rx)         = mpsc::sync_channel::<()>(1);
     let broadcast                  = subnet_broadcast(local_ip.as_deref());
+    let ready:      Arc<Mutex<bool>>           = Arc::new(Mutex::new(false));
+    let bind_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let ready_clone      = Arc::clone(&ready);
+    let bind_error_clone = Arc::clone(&bind_error);
 
     std::thread::Builder::new()
         .name("cue-discovery".into())
-        .spawn(move || run(our_device_id, our_device_name, our_device_type, discovered_clone, ping_rx, broadcast))
+        .spawn(move || run(
+            our_device_id, our_device_name, our_device_type,
+            discovered_clone, ping_rx, broadcast, ready_clone, bind_error_clone,
+        ))
         .expect("spawn discovery thread");
 
-    Discovery { discovered, ping_tx }
+    Discovery { discovered, ready, bind_error, ping_tx }
 }
 
 pub fn current(list: &DiscoveredList) -> Vec<DiscoveredPeer> {
@@ -78,12 +98,14 @@ pub fn current(list: &DiscoveredList) -> Vec<DiscoveredPeer> {
 // ── listener loop ─────────────────────────────────────────────────────────────
 
 fn run(
-    our_id:    String,
-    our_name:  Arc<RwLock<String>>,
-    our_type:  DeviceType,
-    list:      DiscoveredList,
-    ping_rx:   mpsc::Receiver<()>,
-    broadcast: String,
+    our_id:     String,
+    our_name:   Arc<RwLock<String>>,
+    our_type:   DeviceType,
+    list:       DiscoveredList,
+    ping_rx:    mpsc::Receiver<()>,
+    broadcast:  String,
+    ready:      Arc<Mutex<bool>>,
+    bind_error: Arc<Mutex<Option<String>>>,
 ) {
     const BIND_RETRY_INTERVAL: Duration = Duration::from_secs(15);
 
@@ -91,11 +113,14 @@ fn run(
         match bind_socket() {
             Some(s) => break s,
             None => {
+                *bind_error.lock().unwrap() = Some(format!("Порт {UDP_PORT} занят другим приложением"));
                 crate::clog!("[discovery] bind failed, retry in {BIND_RETRY_INTERVAL:?}");
                 std::thread::sleep(BIND_RETRY_INTERVAL);
             }
         }
     };
+    *ready.lock().unwrap()      = true;
+    *bind_error.lock().unwrap() = None;
 
     let mut buf = [0u8; 512];
     loop {

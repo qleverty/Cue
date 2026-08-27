@@ -166,7 +166,11 @@ pub struct SyncHandle {
 }
 
 impl SyncHandle {
-    pub fn init(projects: &mut Vec<crate::project::LoadedProject>, egui_ctx: eframe::egui::Context) -> Self {
+    pub fn init(
+        projects: &mut Vec<crate::project::LoadedProject>,
+        egui_ctx: eframe::egui::Context,
+        http_port: u16,
+    ) -> Self {
         let dir        = crate::app_dir();
         crate::clog!("[sync] init — app_dir={:?}", dir);
         let identity   = identity::DeviceIdentity::load_or_create(&dir);
@@ -222,10 +226,11 @@ impl SyncHandle {
             sync_status:      Mutex::new(SyncStatus::default()),
             discovered,
             ping_tx,
+            http_port,
             egui_ctx,
         });
 
-        server::start(Arc::clone(&shared));
+        server::start(Arc::clone(&shared), http_port);
         engine::start(Arc::clone(&shared), Arc::clone(&cursors), ops_tx, ping_rx, dir.clone());
         engine::start_notifier(Arc::clone(&shared), notify_rx);
 

@@ -4,7 +4,7 @@ use eframe::egui::{self, Color32, ImageSource, RichText, Sense, vec2};
 
 use crate::sync::{
     discovery,
-    server::{PairingRequest, PORT},
+    server::PairingRequest,
     peers::PeerEntry,
     PeerStatus,
     SyncHandle,
@@ -146,9 +146,10 @@ fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sy
                 }
             }
 
+            let our_port = sync.shared.http_port;
             let ip_text = match &sync.local_ip {
-                Some(ip) => format!("{ip} · порт {PORT}"),
-                None     => format!("порт {PORT}"),
+                Some(ip) => format!("{ip} · порт {our_port}"),
+                None     => format!("порт {our_port}"),
             };
             ui.label(
                 RichText::new(ip_text)
@@ -309,11 +310,19 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
         }
 
         ScanState::Empty => {
-            ui.label(
-                RichText::new("Устройств не найдено")
-                    .size(10.5)
-                    .color(Color32::from_white_alpha(64)),
-            );
+            if let Some(err) = sync.shared.discovered.error_for_ui() {
+                ui.label(
+                    RichText::new(err)
+                        .size(10.5)
+                        .color(Color32::from_rgb(220, 80, 80)),
+                );
+            } else {
+                ui.label(
+                    RichText::new("Устройств не найдено")
+                        .size(10.5)
+                        .color(Color32::from_white_alpha(64)),
+                );
+            }
         }
     }
 }
@@ -428,7 +437,10 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
     // and we receive /accept_sync will we register them.
     let ip      = peer.ip.clone();
     let peer_id = peer.device_id.clone();
-    let port    = crate::sync::server::PORT;
+    // TODO: используем СВОЙ порт вместо порта пира — верно, пока у всех
+    // порт дефолтный; ломается, если у пира настроен другой (нужно
+    // отдельно хранить порт каждого пира, см. DiscoveryMsg/PeerEntry).
+    let port    = sync.shared.http_port;
     std::thread::spawn(move || {
         let addr = format!("{ip}:{port}");
         let body = serde_json::json!({
@@ -480,7 +492,9 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
     let our_id   = sync.shared.device_id.clone();
     let our_name = sync.shared.device_name.read().unwrap().clone();
     let token    = req.token.clone();
-    let port     = crate::sync::server::PORT;
+    // TODO: тот же пробел, что и выше — используем свой порт вместо
+    // порта конкретного пира.
+    let port     = sync.shared.http_port;
     std::thread::spawn(move || {
         use std::io::{Read, Write};
         use std::net::TcpStream;

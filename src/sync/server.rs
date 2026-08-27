@@ -11,7 +11,7 @@ use tiny_http::{Method, Request, Response, Server, StatusCode};
 
 use super::{oplog::Op, peers::Peers, DeviceType, OplogState};
 
-pub const PORT:      u16 = 52684;
+pub const DEFAULT_PORT: u16 = 52684;
 pub const PROTO_VER: u32 = 1;
 
 // ── shared state (server + engine both hold an Arc<SharedState>) ─────────────
@@ -32,6 +32,11 @@ pub struct SharedState {
     pub discovered:       super::discovery::Discovery,
     /// Bounded-1 channel: server taps engine on POST /ping_sync.
     pub ping_tx:          mpsc::SyncSender<()>,
+    /// Используется engine.rs для обращения к чужим пирам (по СВОЕМУ
+    /// значению — прим. отдельная задача: сохранять порт КАЖДОГО пира
+    /// отдельно, раз порт теперь настраиваемый индивидуально на каждом
+    /// устройстве; пока не сделано, см. DiscoveryMsg/PeerEntry).
+    pub http_port:        u16,
     /// Used by engine to wake egui immediately after delivering ops.
     pub egui_ctx:         egui::Context,
 }
@@ -52,11 +57,13 @@ const BIND_RETRY_MS:    u64 = 300;
 const YIELD_RESEND_MS:  u64 = 3000;
 const YIELD_TIMEOUT_MS: u64 = 250;
 
-pub fn start(state: Arc<SharedState>) -> std::thread::JoinHandle<()> {
+static PORT_BUSY_NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn start(state: Arc<SharedState>, port: u16) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("cue-sync-server".into())
         .spawn(move || {
-            let server = bind_with_retry();
+            let server = bind_with_retry(port);
             for req in server.incoming_requests() {
                 handle(req, &state);
             }
@@ -64,29 +71,37 @@ pub fn start(state: Arc<SharedState>) -> std::thread::JoinHandle<()> {
         .expect("spawn sync server thread")
 }
 
-fn bind_with_retry() -> Server {
+fn bind_with_retry(port: u16) -> Server {
     let mut last_yield_sent = Instant::now() - Duration::from_millis(YIELD_RESEND_MS);
     loop {
-        match crate::exclusive_bind::bind_exclusive(PORT) {
+        match crate::exclusive_bind::bind_exclusive(port) {
             Ok(listener) => match Server::from_listener(listener, None) {
                 Ok(server) => {
-                    crate::clog!("[sync/server] bind SUCCEEDED on port {PORT}");
+                    crate::clog!("[sync/server] bind SUCCEEDED on port {port}");
+                    PORT_BUSY_NOTIFIED.store(false, std::sync::atomic::Ordering::SeqCst);
                     return server;
                 }
                 Err(e) => crate::clog!("[sync/server] from_listener failed: {e:?}"),
             },
             Err(e) => crate::clog!("[sync/server] bind_exclusive failed: {e:?}"),
         }
+        if !PORT_BUSY_NOTIFIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            crate::notify::send(
+                &format!("Порт {port} занят"),
+                "Синхронизация заморожена",
+                "#DC3232",
+            );
+        }
         if last_yield_sent.elapsed() >= Duration::from_millis(YIELD_RESEND_MS) {
-            send_yield();
+            send_yield(port);
             last_yield_sent = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(BIND_RETRY_MS));
     }
 }
 
-fn send_yield() {
-    let addr = match format!("127.0.0.1:{PORT}").parse() {
+fn send_yield(port: u16) {
+    let addr = match format!("127.0.0.1:{port}").parse() {
         Ok(a)  => a,
         Err(_) => return,
     };
