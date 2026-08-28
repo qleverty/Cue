@@ -57,7 +57,8 @@ const BIND_RETRY_MS:    u64 = 300;
 const YIELD_RESEND_MS:  u64 = 3000;
 const YIELD_TIMEOUT_MS: u64 = 250;
 
-static PORT_BUSY_NOTIFIED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PORT_FAIL_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+const PORT_FAIL_NOTIFY_THRESHOLD: u8 = 5;
 
 pub fn start(state: Arc<SharedState>, port: u16) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -78,8 +79,8 @@ fn bind_with_retry(port: u16) -> Server {
             Ok(listener) => match Server::from_listener(listener, None) {
                 Ok(server) => {
                     crate::clog!("[sync/server] bind SUCCEEDED on port {port}");
-                    let was_notified = PORT_BUSY_NOTIFIED.swap(false, std::sync::atomic::Ordering::SeqCst);
-                    if was_notified {
+                    let prev_count = PORT_FAIL_COUNT.swap(0, std::sync::atomic::Ordering::SeqCst);
+                    if prev_count >= PORT_FAIL_NOTIFY_THRESHOLD {
                         crate::notify::send_no_icon(
                             &format!("Порт {port} освобождён"),
                             "Синхронизация восстановлена",
@@ -91,7 +92,8 @@ fn bind_with_retry(port: u16) -> Server {
             },
             Err(e) => crate::clog!("[sync/server] bind_exclusive failed: {e:?}"),
         }
-        if !PORT_BUSY_NOTIFIED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let fails = PORT_FAIL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        if fails == PORT_FAIL_NOTIFY_THRESHOLD {
             crate::notify::send_no_icon(
                 &format!("Порт {port} занят другим приложением"),
                 "Синхронизация недоступна",
