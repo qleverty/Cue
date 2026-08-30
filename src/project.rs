@@ -11,7 +11,7 @@ pub fn current_time() -> u64 {
         .as_secs()
 }
 
-pub fn gen_id() -> String {
+fn gen_random_string(len: usize) -> String {
     static CTR: AtomicU64 = AtomicU64::new(0);
     let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -21,12 +21,25 @@ pub fn gen_id() -> String {
         ^ ((std::process::id() as u64) << 32)
         ^ CTR.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9e3779b97f4a7c15);
     const CH: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let mut id = String::with_capacity(12);
-    for _ in 0..12 {
+    let mut id = String::with_capacity(len);
+    for _ in 0..len {
         id.push(CH[(n as usize) % 62] as char);
         n = n.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
     }
     id
+}
+
+pub fn gen_id() -> String {
+    gen_random_string(12)
+}
+
+/// Настоящий случайный секрет для пейринга устройств — длиннее и отдельно
+/// от gen_id() не потому что математически отличается, а чтобы явно не
+/// путать "идентификатор чего-либо" с "секрет, который нельзя вычислить
+/// по публичным данным" (см. обсуждение — раньше token был детерминирован
+/// от двух device_id, что делало его вычислимым кем угодно в LAN).
+pub fn gen_token() -> String {
+    gen_random_string(24)
 }
 
 pub fn hex_to_color32(hex: &str) -> Option<Color32> {

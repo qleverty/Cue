@@ -95,6 +95,7 @@ pub fn rebuild_from(projects: &[crate::project::LoadedProject]) {
             color_hex:          p.color_hex.clone(),
             task_count,
             has_active_routine: p.has_active_routine(),
+            order_key:          p.order_key,
         })
     }).collect();
     write_whole(&m);

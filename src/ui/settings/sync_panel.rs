@@ -418,18 +418,17 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
 
 /// Token is derived deterministically from both device IDs so both sides
 /// independently compute the same value — avoids conflicts if both initiate.
-fn deterministic_token(id_a: &str, id_b: &str) -> String {
-    let (lo, hi) = if id_a < id_b { (id_a, id_b) } else { (id_b, id_a) };
-    format!("{lo}:{hi}")
-}
-
 fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer) {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
     let our_id   = sync.shared.device_id.clone();
-    let token    = deterministic_token(&our_id, &peer.device_id);
+    // "token" тут — просто заявочное значение для pending_pairings на
+    // принимающей стороне (не финальный секрет). Настоящий секрет
+    // генерирует получатель при нажатии "Принять" и присылает его нам
+    // отдельно, адресно, в /1/accept_sync — см. accept_pairing().
+    let placeholder_token = String::new();
     let our_name = sync.shared.device_name.read().unwrap().clone();
 
     // POST /request_sync to the peer in a background thread.
@@ -446,7 +445,7 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
         let body = serde_json::json!({
             "device_id":   our_id,
             "device_name": our_name,
-            "token":       token,
+            "token":       placeholder_token,
             "device_type": "desktop",
         }).to_string();
         let req = format!(
@@ -474,11 +473,18 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
 }
 
 fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
+    // Настоящий секрет — генерируется ЗДЕСЬ, на принимающей стороне, а не
+    // вычисляется детерминированно из двух device_id (как было раньше —
+    // это делало его тривиально вычислимым любым, кто просто слушает
+    // discovery-broadcast: device_id рассылается открытым текстом). Секрет
+    // никогда не улетает в broadcast — только адресно, в accept_sync ниже.
+    let real_token = crate::project::gen_token();
+
     // Add the initiator to our trusted peers.
     let entry = PeerEntry {
         device_id:      req.device_id.clone(),
         device_name:    req.device_name.clone(),
-        token:          req.token.clone(),
+        token:          real_token.clone(),
         ip_hint:        Some(req.from_ip.clone()),
         last_synced_at: None,
         device_type:    req.device_type,
@@ -491,7 +497,7 @@ fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
     let ip       = req.from_ip.clone();
     let our_id   = sync.shared.device_id.clone();
     let our_name = sync.shared.device_name.read().unwrap().clone();
-    let token    = req.token.clone();
+    let token    = real_token;
     // TODO: тот же пробел, что и выше — используем свой порт вместо
     // порта конкретного пира.
     let port     = sync.shared.http_port;
