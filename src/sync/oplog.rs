@@ -21,6 +21,13 @@ pub enum OpKind {
     RenameProject  { project_id: String, name: String },
     #[serde(rename = "RECOLOR_PROJECT")]
     RecolorProject { project_id: String, color: String },
+    /// Перемещение проекта в произвольном порядке (v2.1 — drag & drop
+    /// списка проектов). В v2 никогда не отправляется (сортировки по
+    /// произвольному порядку ещё нет), но должен приниматься и применяться
+    /// уже сейчас, чтобы устройство на v2 не спотыкалось об оп, присланный
+    /// устройством на v2.1.
+    #[serde(rename = "MOVE_PROJECT")]
+    MoveProject    { project_id: String, order_key: f64 },
     #[serde(rename = "ADD_TASK")]
     AddTask        { project_id: String, task_id: String, text: String, target: AddTarget },
     #[serde(rename = "DELETE_TASK")]
@@ -36,6 +43,11 @@ pub enum OpKind {
     PromoteTask    { project_id: String, task_id: String },
     #[serde(rename = "EDIT_TASK")]
     EditTask       { project_id: String, task_id: String, text: String },
+    /// Перемещение задачи внутри subs (drag & drop списка задач). `order_key`
+    /// — не физический индекс: он не переносится между устройствами один в
+    /// один, поэтому оп несёт именно ключ сортировки, а не позицию.
+    #[serde(rename = "MOVE_TASK")]
+    MoveTask       { project_id: String, task_id: String, order_key: f64 },
     /// Полная перезапись расписания задачи. `routine: None` — убрать
     /// рутину целиком (задача остаётся обычной). Без диффов.
     #[serde(rename = "SET_ROUTINE")]
@@ -57,11 +69,13 @@ impl OpKind {
             OpKind::DeleteProject  { project_id }     => Some(project_id),
             OpKind::RenameProject  { project_id, .. } => Some(project_id),
             OpKind::RecolorProject { project_id, .. } => Some(project_id),
+            OpKind::MoveProject    { project_id, .. } => Some(project_id),
             OpKind::AddTask        { project_id, .. } => Some(project_id),
             OpKind::DeleteTask     { project_id, .. } => Some(project_id),
             OpKind::CompleteTask   { project_id, .. } => Some(project_id),
             OpKind::PromoteTask    { project_id, .. } => Some(project_id),
             OpKind::EditTask       { project_id, .. } => Some(project_id),
+            OpKind::MoveTask       { project_id, .. } => Some(project_id),
             OpKind::SetRoutine     { project_id, .. } => Some(project_id),
             OpKind::SetSharedSetting { .. }           => None,
         }
@@ -122,11 +136,13 @@ impl OpLog {
             OpKind::DeleteProject  { .. } => "DELETE_PROJECT",
             OpKind::RenameProject  { .. } => "RENAME_PROJECT",
             OpKind::RecolorProject { .. } => "RECOLOR_PROJECT",
+            OpKind::MoveProject    { .. } => "MOVE_PROJECT",
             OpKind::AddTask        { .. } => "ADD_TASK",
             OpKind::DeleteTask     { .. } => "DELETE_TASK",
             OpKind::CompleteTask   { .. } => "COMPLETE_TASK",
             OpKind::PromoteTask    { .. } => "PROMOTE_TASK",
             OpKind::EditTask       { .. } => "EDIT_TASK",
+            OpKind::MoveTask       { .. } => "MOVE_TASK",
             OpKind::SetRoutine     { .. } => "SET_ROUTINE",
             OpKind::SetSharedSetting{..}  => "SET_SHARED_SETTING",
         };

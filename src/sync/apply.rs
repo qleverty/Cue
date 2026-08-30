@@ -28,6 +28,11 @@ pub fn apply_op(
             let c = hex_to_color32(color)?;
             let mut p   = LoadedProject::new(project_id.clone(), name.clone(), c, *created_at);
             p.color_hex = color.clone();
+            // "В конец" — единственный вариант размещения нового проекта в
+            // v2 (сортировки "Произвольный" ещё нет), поэтому order_key не
+            // приходит по сети — каждое устройство ставит его само,
+            // независимо, тем же приёмом, что и next_end_key() у задач.
+            p.order_key = projects.iter().map(|p| p.order_key).fold(0.0, f64::max) + 1000.0;
             projects.push(p);
             Some(project_id.clone())
         }
@@ -58,6 +63,14 @@ pub fn apply_op(
             p.color_edited_at = op.ts;
             Some(project_id.clone())
         }
+        OpKind::MoveProject { project_id, order_key } => {
+            if tombstones.deleted_at(project_id).is_some() { return None; }
+            let p = projects.iter_mut().find(|p| &p.id == project_id)?;
+            if op.ts <= p.order_key_edited_at { return None; }
+            p.order_key = *order_key;
+            p.order_key_edited_at = op.ts;
+            Some(project_id.clone())
+        }
 
         // ── tasks ─────────────────────────────────────────────────────────
         OpKind::AddTask { project_id, task_id, text, target } => {
@@ -69,7 +82,7 @@ pub fn apply_op(
             let task = TaskData {
                 text: text.clone(), routine: None,
                 created_at: op.ts, order_key: 0.0,
-                text_edited_at: op.ts, routine_edited_at: 0,
+                text_edited_at: op.ts, routine_edited_at: 0, pos_edited_at: 0,
             };
             match target {
                 AddTarget::Main => {
@@ -122,6 +135,13 @@ pub fn apply_op(
                 .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
             let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
             if !proj.apply_edit_task(task_id, text, op.ts) { return None; }
+            Some(project_id.clone())
+        }
+        OpKind::MoveTask { project_id, task_id, order_key } => {
+            if tombstones.deleted_at(project_id)
+                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
+            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
+            if !proj.apply_move_task(task_id, *order_key, op.ts) { return None; }
             Some(project_id.clone())
         }
 

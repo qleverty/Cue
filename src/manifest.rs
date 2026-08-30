@@ -21,6 +21,11 @@ pub struct ManifestEntry {
     pub color_hex:          String,
     pub task_count:         usize,
     pub has_active_routine: bool,
+    /// Ключ сортировки для произвольного порядка проектов (v2.1). В v2
+    /// хранится и синхронизируется, но нигде не используется для
+    /// отображения.
+    #[serde(default)]
+    pub order_key:          f64,
 }
 
 /// id проекта → его запись в манифесте.

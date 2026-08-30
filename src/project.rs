@@ -94,6 +94,10 @@ pub struct TaskData {
     pub text_edited_at:    u64,
     #[serde(default)]
     pub routine_edited_at: u64,
+    /// LWW-метка для MoveTask — только приёмная сторона в v2 (UI drag &
+    /// drop локальный, без опа), появится в v2.1.
+    #[serde(default)]
+    pub pos_edited_at:     u64,
 }
 
 /// Эффективно активна ли задача (для сортировки/выбора следующей main).
@@ -124,6 +128,11 @@ struct ProjectFile {
     name_edited_at:  u64,
     #[serde(default)]
     color_edited_at: u64,
+    /// Ключ сортировки для произвольного порядка проектов (v2.1).
+    #[serde(default)]
+    order_key:       f64,
+    #[serde(default)]
+    order_key_edited_at: u64,
 }
 
 pub struct LoadedProject {
@@ -151,6 +160,11 @@ pub struct LoadedProject {
     /// оп от будущего v2.1-устройства.
     pub name_edited_at:  u64,
     pub color_edited_at: u64,
+    /// Ключ сортировки для произвольного порядка проектов (v2.1). В v2
+    /// хранится и синхронизируется (см. MoveProject в apply.rs), но нигде
+    /// не используется для отображения — сортировки "Произвольный" в v2 нет.
+    pub order_key:           f64,
+    pub order_key_edited_at: u64,
 }
 
 impl LoadedProject {
@@ -166,6 +180,44 @@ impl LoadedProject {
         if ts <= t.text_edited_at { return false; }
         t.text = text.to_owned();
         t.text_edited_at = ts;
+        true
+    }
+
+    /// Единая точка применения перемещения задачи (drag & drop списка) — и
+    /// для локального действия пользователя, и для входящего сетевого опа.
+    /// LWW по `ts` на `pos_edited_at`, как и у остальных apply_*.
+    ///
+    /// В отличие от `reorder_sub` (локальный драг — знает физический индекс
+    /// места сброса из позиции курсора) здесь известен только конечный
+    /// `order_key`: устройство, принимающее оп, само находит, между какими
+    /// соседями по `order_key` физически встанет задача, и переставляет её
+    /// в `subs`. Физическая позиция таким образом никогда не расходится с
+    /// `order_key` ни на одном устройстве — это важно, потому что при
+    /// выключенном тумблере "неактивные рутины в конец" для отображения
+    /// используется именно физический порядок, не `order_key` напрямую.
+    ///
+    /// `main` — фиксированный слот без понятия физической позиции: для неё
+    /// перестановка не нужна, только обновление ключа и метки LWW.
+    pub fn apply_move_task(&mut self, task_id: &str, order_key: f64, ts: u64) -> bool {
+        if let Some(t) = self.main.get_mut(task_id) {
+            if ts <= t.pos_edited_at { return false; }
+            t.order_key     = order_key;
+            t.pos_edited_at = ts;
+            return true;
+        }
+
+        let Some(idx) = self.subs.get_index_of(task_id) else { return false; };
+        let Some((_, t)) = self.subs.get_index(idx) else { return false; };
+        if ts <= t.pos_edited_at { return false; }
+
+        let Some((id, mut task)) = self.subs.shift_remove_index(idx) else { return false; };
+        task.order_key     = order_key;
+        task.pos_edited_at = ts;
+
+        let target = self.subs.iter()
+            .position(|(_, t)| t.order_key > order_key)
+            .unwrap_or(self.subs.len());
+        self.subs.shift_insert(target, id, task);
         true
     }
 
@@ -253,6 +305,7 @@ impl LoadedProject {
             created_at,
             loaded:     true,
             main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
+            order_key: 0.0, order_key_edited_at: 0,
         }
     }
 
@@ -272,6 +325,7 @@ impl LoadedProject {
             last_edited: current_time(),
             created_at:  self.created_at,
             main_edited_at: self.main_edited_at, name_edited_at: self.name_edited_at, color_edited_at: self.color_edited_at,
+            order_key: self.order_key, order_key_edited_at: self.order_key_edited_at,
         };
         let path = projects_dir().join(format!("{}.json", self.id));
         let tmp  = projects_dir().join(format!("{}.json.tmp", self.id));
@@ -288,6 +342,7 @@ impl LoadedProject {
             color_hex:          self.color_hex.clone(),
             task_count:         self.main.len() + self.subs.len(),
             has_active_routine: self.has_active_routine(),
+            order_key:          self.order_key,
         });
     }
 
@@ -311,7 +366,7 @@ impl LoadedProject {
     pub fn add_task(&mut self, id: String, text: String, s: &Settings) {
         let mut task = TaskData {
             text, routine: None, created_at: current_time(), order_key: 0.0,
-            text_edited_at: current_time(), routine_edited_at: 0,
+            text_edited_at: current_time(), routine_edited_at: 0, pos_edited_at: 0,
         };
 
         if self.main.is_empty() {
@@ -438,25 +493,28 @@ impl LoadedProject {
         }
     }
 
-    /// Перетаскивание задачи по списку (drag & drop). `from` — физический
-    /// индекс перетаскиваемой задачи ДО перемещения. `to_before` — физический
-    /// индекс задачи, ПЕРЕД которой нужно вставить перетаскиваемую (в
-    /// display-порядке на момент отпускания мыши); `None` — вставить в
-    /// самый конец списка.
+    /// Физическое перемещение задачи в subs по локальному действию юзера
+    /// (drag & drop). `from` — физический индекс перетаскиваемой задачи ДО
+    /// перемещения. `to_before` — физический индекс задачи, ПЕРЕД которой
+    /// нужно вставить перетаскиваемую (в display-порядке на момент
+    /// отпускания мыши); `None` — вставить в самый конец списка.
     ///
     /// order_key пересчитывается интерполяцией между order_key НОВЫХ
     /// физических соседей (после перемещения) — сознательно не учитывает
     /// группировку active/inactive: это просто число между двумя другими
-    /// числами, коллизии с order_key задач из другой группы безобидны (см.
-    /// обсуждение) и максимум приводят к сдвигу на одну строку при
-    /// реактивации рутины в редком случае.
+    /// числами, коллизии с order_key задач из другой группы безобидны и
+    /// максимум приводят к сдвигу на одну строку при реактивации рутины в
+    /// редком случае.
     ///
     /// Физическая позиция в IndexMap двигается вместе с order_key, чтобы
     /// порядок был согласован и при выключенном тумблере группировки (где
     /// физический порядок — это и есть порядок отображения).
-    pub fn reorder_sub(&mut self, from: usize, to_before: Option<usize>) {
-        if Some(from) == to_before { return; } // дропнули на себя же — no-op
-        let Some((id, mut task)) = self.subs.shift_remove_index(from) else { return; };
+    ///
+    /// Возвращает `(task_id, новый order_key)` для записи MoveTask-опа —
+    /// `None`, если дропнули на себя же (no-op).
+    pub fn reorder_sub(&mut self, from: usize, to_before: Option<usize>, ts: u64) -> Option<(String, f64)> {
+        if Some(from) == to_before { return None; } // дропнули на себя же — no-op
+        let (id, mut task) = self.subs.shift_remove_index(from)?;
 
         // to_before был индексом ДО удаления; если он шёл после удалённого
         // слота — после shift_remove_index он сместился на 1 назад.
@@ -476,8 +534,11 @@ impl LoadedProject {
             (None, Some(n))    => n - 1000.0,
             (None, None)       => 0.0,
         };
+        task.pos_edited_at = ts;
 
-        self.subs.shift_insert(target, id, task);
+        let order_key = task.order_key;
+        self.subs.shift_insert(target, id.clone(), task);
+        Some((id, order_key))
     }
 
 }
@@ -502,6 +563,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
         created_at: file.created_at,
         loaded:     true,
         main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
+        order_key: file.order_key, order_key_edited_at: file.order_key_edited_at,
     })
 }
 
@@ -570,6 +632,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 created_at: file.created_at,
                 loaded:     true,
                 main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
+                order_key: file.order_key, order_key_edited_at: file.order_key_edited_at,
             };
             // Физический порядок subs больше не пересортировывается —
             // хранится как в файле. Группировка active/inactive для показа

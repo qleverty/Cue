@@ -382,6 +382,7 @@ impl App {
                         created_at: 0, // временная заглушка — см. project.rs, load_active_with_fallback
                         loaded:     false,
                         main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
+                        order_key: entry.order_key, order_key_edited_at: 0,
                     }
                 })
                 .collect();
@@ -803,7 +804,7 @@ impl eframe::App for App {
                                 task_id,
                                 project::TaskData {
                                     text: first, routine: None, created_at: ts, order_key: 0.0,
-                                    text_edited_at: ts, routine_edited_at: 0,
+                                    text_edited_at: ts, routine_edited_at: 0, pos_edited_at: 0,
                                 },
                                 ts,
                             );
@@ -1152,7 +1153,14 @@ impl eframe::App for App {
                     if !name.is_empty() {
                         let color = PROJECT_PALETTE[self.project_new_color_idx];
                         let ts    = project::current_time();
-                        let p     = project::LoadedProject::new(project::gen_id(), name, color, ts);
+                        let mut p = project::LoadedProject::new(project::gen_id(), name, color, ts);
+                        // "В конец" — единственный вариант в v2 (сортировки
+                        // "Произвольный" ещё нет), поэтому просто ставим
+                        // ключ выше всех существующих. Тот же приём, что и
+                        // у next_end_key() для задач, только среди проектов.
+                        p.order_key = self.projects.iter()
+                            .map(|proj| proj.order_key)
+                            .fold(0.0, f64::max) + 1000.0;
                         p.save();
                         let _ = self.sync.record_op(sync::oplog::OpKind::CreateProject {
                             project_id: p.id.clone(),
@@ -1857,7 +1865,16 @@ impl eframe::App for App {
                         }
                         ui.painter().hline(0.0..=self.w, line_y, (0.41, SEP));
                         if pointer_released {
-                            self.projects[idx].reorder_sub(dragged_real_i, insert_before);
+                            let ts = project::current_time();
+                            if let Some((task_id, order_key)) =
+                                self.projects[idx].reorder_sub(dragged_real_i, insert_before, ts)
+                            {
+                                let _ = self.sync.record_op(sync::oplog::OpKind::MoveTask {
+                                    project_id: self.projects[idx].id.clone(),
+                                    task_id,
+                                    order_key,
+                                });
+                            }
                             self.dragging_task = None;
                         }
                     }
