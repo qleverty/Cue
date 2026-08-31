@@ -39,6 +39,11 @@ pub struct SharedState {
     pub http_port:        u16,
     /// Used by engine to wake egui immediately after delivering ops.
     pub egui_ctx:         egui::Context,
+    /// Пишется UI каждый кадр: сейчас открыта именно вкладка "Синхронизация"
+    /// настроек? Если нет на момент входящего /1/request_sync — шлём
+    /// системное уведомление (см. request_sync ниже), чтобы юзер не
+    /// пропустил запрос, зайдя случайно в другую вкладку/экран.
+    pub viewing_sync_panel: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -191,6 +196,8 @@ fn request_sync(mut req: Request, state: &SharedState) {
     }
 
     let from_ip = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+    let device_name_for_notify = b.device_name.clone();
+    let is_new;
     {
         let mut pending = state.pending_pairings.lock().unwrap();
         // Не плодим дубликаты, если это устройство уже прислало запрос
@@ -198,20 +205,33 @@ fn request_sync(mut req: Request, state: &SharedState) {
         // подряд нажал "Подключить") — просто обновляем данные на месте.
         match pending.iter_mut().find(|p| p.device_id == b.device_id) {
             Some(existing) => {
+                is_new = false;
                 existing.device_name = b.device_name;
                 existing.token       = b.token;
                 existing.from_ip     = from_ip;
                 existing.device_type = b.device_type;
             }
-            None => pending.push(PairingRequest {
-                device_id:   b.device_id,
-                device_name: b.device_name,
-                token:       b.token,
-                from_ip,
-                device_type: b.device_type,
-            }),
+            None => {
+                is_new = true;
+                pending.push(PairingRequest {
+                    device_id:   b.device_id,
+                    device_name: b.device_name,
+                    token:       b.token,
+                    from_ip,
+                    device_type: b.device_type,
+                });
+            }
         }
         save_pending_pairings(state.oplog_path.parent().unwrap_or(std::path::Path::new(".")), &pending);
+    }
+    // Уведомление — только на действительно новый запрос (не на повторные
+    // от того же устройства) и только если юзер прямо сейчас не смотрит на
+    // вкладку "Синхронизация" — там баннер и так на виду.
+    if is_new && !state.viewing_sync_panel.load(std::sync::atomic::Ordering::Relaxed) {
+        crate::notify::send_no_icon(
+            "Запрос на подключение",
+            &format!("{device_name_for_notify} хочет синхронизироваться с этим устройством"),
+        );
     }
     // Wake egui so the pairing banner appears immediately.
     state.egui_ctx.request_repaint();

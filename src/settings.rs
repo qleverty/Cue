@@ -6,7 +6,7 @@ use super::BG;
 
 pub const SW: f32 = 300.0;
 
-pub const SH_GENERAL:  f32 = 226.0;
+pub const SH_GENERAL:  f32 = 270.0;
 pub const SH_PROJECTS: f32 = 160.0;
 pub const SH_SYNC:     f32 = 310.0;
 
@@ -45,10 +45,19 @@ pub struct Settings {
     /// бэкенд уже полностью параметризован под него.
     #[serde(default = "default_http_port")]
     pub http_port: u16,
+    /// Жёлтое подчёркивание рутинных задач. Чисто отображение конкретного
+    /// устройства — не синкается (без _edited_at, как last_project_id).
+    #[serde(default = "default_highlight_routines")]
+    pub highlight_routines: bool,
+    /// Число задач рядом с именем проекта — только в списке проектов
+    /// (свитчере), не в шапке с текущим проектом. Тоже чисто локальное.
+    #[serde(default)]
+    pub show_task_count: bool,
 }
 
 fn default_group_inactive() -> bool { true }
 fn default_http_port() -> u16 { crate::sync::server::DEFAULT_PORT }
+fn default_highlight_routines() -> bool { true }
 
 impl Settings {
     /// Единая точка применения — и для локального действия в UI, и для
@@ -81,6 +90,8 @@ impl Default for Settings {
             last_pos:         None,
             group_inactive_at_end: true,
             http_port: crate::sync::server::DEFAULT_PORT,
+            highlight_routines: true,
+            show_task_count: false,
         }
     }
 }

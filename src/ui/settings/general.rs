@@ -78,6 +78,22 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, sync: &mut crate::sync::
         ui.label(RichText::new("Неактивные рутины — в конец списка")
             .color(Color32::from_gray(190)).size(13.0));
     });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.checkbox(&mut settings.highlight_routines, "").changed() { changed = true; }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Подсветка рутинных задач")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.checkbox(&mut settings.show_task_count, "").changed() { changed = true; }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Число задач в списке проектов")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
 
     if changed { settings.save(); }
 

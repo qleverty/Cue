@@ -178,6 +178,12 @@ pub struct LoadedProject {
     /// не используется для отображения — сортировки "Произвольный" в v2 нет.
     pub order_key:           f64,
     pub order_key_edited_at: u64,
+    /// Кэш числа задач (main+subs) — для отрисовки в свитчере проектов, в
+    /// т.ч. пока проект ещё манифестная заглушка (loaded: false) и main/subs
+    /// физически пусты. НЕ часть ProjectFile — считается заново при каждом
+    /// save() и при загрузке, здесь только чтобы не открывать файл лишний
+    /// раз ради одной цифры.
+    pub task_count: usize,
 }
 
 impl LoadedProject {
@@ -319,6 +325,7 @@ impl LoadedProject {
             loaded:     true,
             main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
             order_key: 0.0, order_key_edited_at: 0,
+            task_count: 0,
         }
     }
 
@@ -326,7 +333,8 @@ impl LoadedProject {
         self.main.values().next().map(|t| t.text.as_str())
     }
 
-    pub fn save(&self) {
+    pub fn save(&mut self) {
+        self.task_count = self.main.len() + self.subs.len();
         let file = ProjectFile {
             ver:   1,
             name:  self.name.clone(),
@@ -353,7 +361,7 @@ impl LoadedProject {
         crate::manifest::upsert_entry(&self.id, crate::manifest::ManifestEntry {
             name:               self.name.clone(),
             color_hex:          self.color_hex.clone(),
-            task_count:         self.main.len() + self.subs.len(),
+            task_count:         self.task_count,
             has_active_routine: self.has_active_routine(),
             order_key:          self.order_key,
         });
@@ -566,6 +574,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
     let text = std::fs::read_to_string(&path).ok()?;
     let file: ProjectFile = serde_json::from_str(&text).ok()?;
     let color = hex_to_color32(&file.color)?;
+    let task_count = file.tasks.main.len() + file.tasks.subs.len();
     Some(LoadedProject {
         id: id.to_owned(),
         name:       file.name,
@@ -577,6 +586,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
         loaded:     true,
         main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
         order_key: file.order_key, order_key_edited_at: file.order_key_edited_at,
+        task_count,
     })
 }
 
@@ -635,6 +645,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
             let text = std::fs::read_to_string(&path).ok()?;
             let file: ProjectFile = serde_json::from_str(&text).ok()?;
             let color = hex_to_color32(&file.color)?;
+            let task_count = file.tasks.main.len() + file.tasks.subs.len();
             let proj = LoadedProject {
                 id,
                 name:       file.name,
@@ -646,6 +657,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 loaded:     true,
                 main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
                 order_key: file.order_key, order_key_edited_at: file.order_key_edited_at,
+                task_count,
             };
             // Физический порядок subs больше не пересортировывается —
             // хранится как в файле. Группировка active/inactive для показа
@@ -658,7 +670,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
 
 pub fn create_default_project() -> LoadedProject {
     let _ = std::fs::create_dir_all(projects_dir());
-    let proj = LoadedProject::new(
+    let mut proj = LoadedProject::new(
         gen_id(),
         "Cue".to_owned(),
         Color32::from_rgb(74, 144, 217),

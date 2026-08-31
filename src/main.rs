@@ -383,6 +383,7 @@ impl App {
                         loaded:     false,
                         main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
                         order_key: entry.order_key, order_key_edited_at: 0,
+                        task_count: entry.task_count,
                     }
                 })
                 .collect();
@@ -595,6 +596,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // Пишем каждый кадр безусловно (не только внутри ветки
+        // Screen::Settings) — иначе при уходе с экрана настроек значение
+        // осталось бы залипшим на last-true, и уведомления о пейринге
+        // молчали бы даже когда юзер давно закрыл настройки.
+        self.sync.shared.viewing_sync_panel.store(
+            matches!(self.screen, Screen::Settings)
+                && matches!(self.settings_ui.tab, settings::SettingsTab::Sync),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+
         // ── Alt+F4 / закрытие всего окна: если в этот момент открыт редактор
         // рутины — успеть закоммитить его состояние перед выходом. Не
         // мешает крашу/убийству через диспетчер задач — там этот код просто
@@ -673,7 +684,7 @@ impl eframe::App for App {
                 }
             }
             for pid in &dirty {
-                if let Some(p) = self.projects.iter().find(|p| p.id == *pid) {
+                if let Some(p) = self.projects.iter_mut().find(|p| p.id == *pid) {
                     p.save();
                 }
             }
@@ -936,6 +947,9 @@ impl eframe::App for App {
                 const ROW_H: f32 = 17.0;
                 let font = egui::FontId::proportional(10.5);
 
+                // +34 под "(999)" — с запасом, если включён счётчик задач,
+                // чтобы он не наезжал на крестик удаления справа.
+                let count_reserve: f32 = if self.settings.show_task_count { 34.0 } else { 0.0 };
                 let row_w: f32 = {
                     let max_label_px = ctx.fonts_mut(|f| {
                         self.projects.iter()
@@ -944,9 +958,9 @@ impl eframe::App for App {
                             ).size().x)
                             .fold(0.0_f32, f32::max)
                     });
-                    (max_label_px + 37.0).clamp(150.0, self.w - 16.0)
+                    (max_label_px + 37.0 + count_reserve).clamp(150.0, self.w - 16.0)
                 };
-                let text_avail = row_w - 15.0 - 4.0 - 18.0;
+                let text_avail = row_w - 15.0 - 4.0 - 18.0 - count_reserve;
 
                 let project_adding     = self.project_adding;
                 let project_need_focus = self.project_need_focus;
@@ -1007,6 +1021,22 @@ impl eframe::App for App {
                                             ui.painter().galley(
                                                 rr.min + vec2(15.0, (ROW_H - galley.size().y) / 2.0),
                                                 galley, label_col);
+
+                                            // Счётчик — только в этом списке (свитчере), не в
+                                            // шапке с текущим проектом. Прижат к правому краю
+                                            // (перед зоной крестика удаления), а не приклеен к
+                                            // имени — иначе при truncate он бы "прыгал" по X в
+                                            // зависимости от фактической длины имени.
+                                            if self.settings.show_task_count {
+                                                let count_text = format!("({})", proj.task_count);
+                                                let count_job = egui::text::LayoutJob::simple_singleline(
+                                                    count_text, font.clone(), Color32::from_gray(120));
+                                                let count_galley = ctx.fonts_mut(|f| f.layout_job(count_job));
+                                                let x = rr.min.x + row_w - 22.0 - count_galley.size().x;
+                                                ui.painter().galley(
+                                                    egui::pos2(x, rr.min.y + (ROW_H - count_galley.size().y) / 2.0),
+                                                    count_galley, Color32::from_gray(120));
+                                            }
 
                                             let name_rect = egui::Rect::from_min_size(
                                                 rr.min,
@@ -1351,7 +1381,7 @@ impl eframe::App for App {
                 None => self.projects[self.active_project_idx].main
                     .values().next().map_or(false, |t| t.routine.is_some()),
             };
-            if is_routine {
+            if is_routine && self.settings.highlight_routines {
                 job.sections[0].format.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
             }
             let galley = ctx.fonts_mut(|f| f.layout_job(job));
@@ -1735,7 +1765,8 @@ impl eframe::App for App {
                                             color: text_color,
                                             ..Default::default()
                                         };
-                                        if has_routine && is_active && !is_dragged_row {
+                                        if has_routine && is_active && !is_dragged_row
+                                            && self.settings.highlight_routines {
                                             fmt.underline = Stroke::new(1.0, ROUTINE_UNDERLINE);
                                         }
                                         let mut job = egui::text::LayoutJob::default();

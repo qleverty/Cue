@@ -228,6 +228,7 @@ impl SyncHandle {
             ping_tx,
             http_port,
             egui_ctx,
+            viewing_sync_panel: std::sync::atomic::AtomicBool::new(false),
         });
 
         server::start(Arc::clone(&shared), http_port);
