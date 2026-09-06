@@ -355,16 +355,12 @@ impl App {
             clog!("[start] rebuilding manifest from {} loaded projects", loaded.len());
             manifest::rebuild_from(&loaded);
 
-            let last_id = settings.last_project_id.clone();
-            active_idx = last_id.as_deref()
-                .and_then(|id| loaded.iter().position(|p| p.id == id))
-                .unwrap_or(0);
+            active_idx = project::resolve_active_project(&loaded, &settings).unwrap_or(0);
             projects         = loaded;
             project_loader_rx = None; // поток ничего не пришлёт — see need_load_projects ниже
         } else {
             clog!("[start] Ветка Б (partial load) — манифест содержит {} проектов", manifest.len());
-            let last_id = settings.last_project_id.clone();
-            let active  = project::load_active_with_fallback(&manifest, last_id.as_deref());
+            let active  = project::load_active_with_fallback(&manifest, settings.preferred_project_id());
             let active_id = active.id.clone();
 
             let mut built: Vec<project::LoadedProject> = manifest.iter()
@@ -456,8 +452,11 @@ impl App {
     /// синхронно, на месте клика, пытается дочитать именно этот один файл.
     /// См. Cue_Мёрж_Батча_И_Битые_Файлы.txt, "СЦЕНАРИЙ: КЛИК НА ПРОЕКТ,
     /// КОТОРОГО ЕЩЁ НЕТ В self.projects С ЗАГРУЖЕННЫМИ ЗАДАЧАМИ".
-    fn switch_to_project(&mut self, idx: usize) {
-        if idx == self.active_project_idx { return; }
+    /// Возвращает false, если переключение не удалось (проект был фантомно
+    /// убран из ОЗУ) — в этом случае активный проект не меняется, вызывающая
+    /// сторона решает, что делать с UI (см. клик по проекту в списке).
+    fn switch_to_project(&mut self, idx: usize) -> bool {
+        if idx == self.active_project_idx { return true; }
 
         if !self.projects[idx].loaded {
             match project::load_one(&self.projects[idx].id) {
@@ -479,11 +478,11 @@ impl App {
                     if self.projects.is_empty() {
                         self.projects.push(project::create_default_project());
                         self.active_project_idx = 0;
+                        self.settings.last_project_id =
+                            Some(self.projects[self.active_project_idx].id.clone());
+                        self.settings.save();
                     }
-                    self.settings.last_project_id =
-                        Some(self.projects[self.active_project_idx].id.clone());
-                    self.settings.save();
-                    return; // idx-проекта больше нет — переключение на него отменено
+                    return false; // idx-проекта больше нет — переключение на него отменено
                 }
             }
         }
@@ -491,6 +490,7 @@ impl App {
         self.active_project_idx = idx;
         self.settings.last_project_id = Some(self.projects[idx].id.clone());
         self.settings.save();
+        true
     }
 
     /// Коммитит текущее состояние окна редактора рутины в модель/оплог/диск —
@@ -688,16 +688,31 @@ impl eframe::App for App {
                     p.save();
                 }
             }
-            // A synced DeleteProject may have shrunk `projects` — guard the active index.
-            if self.projects.is_empty() {
-                self.projects.push(project::create_default_project());
-                self.active_project_idx = 0;
-                self.settings.last_project_id = Some(self.projects[0].id.clone());
-                self.settings.save();
-            } else if self.active_project_idx >= self.projects.len() {
-                self.active_project_idx = self.projects.len() - 1;
-                self.settings.last_project_id = Some(self.projects[self.active_project_idx].id.clone());
-                self.settings.save();
+            // A synced DeleteProject may have shrunk/reshuffled `projects` — guard the active
+            // index. Проверяем только физическое наличие текущего активного проекта (по id,
+            // не по preferred_project_id — тот учитывает fixed-режим и не должен тянуть сюда
+            // юзера каждый кадр, если он вручную переключился на другой проект).
+            let active_id = self.settings.last_project_id.clone();
+            let idx_ok = self.projects.get(self.active_project_idx)
+                .map(|p| Some(p.id.as_str()) == active_id.as_deref())
+                .unwrap_or(false);
+            if !idx_ok {
+                match active_id.as_deref().and_then(|id| self.projects.iter().position(|p| p.id == id)) {
+                    Some(idx) => { self.active_project_idx = idx; }
+                    None => match project::resolve_active_project(&self.projects, &self.settings) {
+                        Some(idx) => {
+                            self.active_project_idx = idx;
+                            self.settings.last_project_id = Some(self.projects[idx].id.clone());
+                            self.settings.save();
+                        }
+                        None => {
+                            self.projects.push(project::create_default_project());
+                            self.active_project_idx = 0;
+                            self.settings.last_project_id = Some(self.projects[0].id.clone());
+                            self.settings.save();
+                        }
+                    }
+                }
             }
         }
         // ── drain project-loader batch (Ветка Б холодного старта) ──────────
@@ -839,7 +854,7 @@ impl eframe::App for App {
 
         if let Screen::Settings = self.screen {
             let (close, target_h) = settings::draw_settings_ui(
-                &ctx, ui, &mut self.settings, &mut self.settings_ui, &mut self.sync,
+                &ctx, ui, &mut self.settings, &mut self.settings_ui, &mut self.sync, &self.projects,
             );
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(
                 vec2(settings::SW, target_h),
@@ -1212,10 +1227,11 @@ impl eframe::App for App {
                     self.project_new_color_idx = 0;
                 }
                 if let Some(i) = select_project {
-                    self.switch_to_project(i);
-                    self.project_open   = false;
-                    self.project_adding = false;
-                    self.project_buf.clear();
+                    if self.switch_to_project(i) {
+                        self.project_open   = false;
+                        self.project_adding = false;
+                        self.project_buf.clear();
+                    }
                 }
                 if open_settings {
                     self.project_open   = false;

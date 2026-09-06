@@ -590,47 +590,45 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
     })
 }
 
-/// Синхронно загружает активный проект на старте, с фолбэком для
-/// битого/отсутствующего файла — см. Cue_Мёрж_Батча_И_Битые_Файлы.txt,
+/// Сколько проектов пробуем прочитать на старте, прежде чем сдаться и
+/// создать дефолтный. Ограничено намеренно — при системной порче диска
+/// неограниченная цепочка попыток могла бы затянуть старт на
+/// неопределённое время, см. Cue_Мёрж_Батча_И_Битые_Файлы.txt,
 /// "СЦЕНАРИЙ: АКТИВНЫЙ ПРОЕКТ БИТ/НЕДОСТУПЕН ИМЕННО НА СТАРТЕ".
-///
-/// ГОТОВО, НО ПОКА НИКЕМ НЕ ВЫЗЫВАЕТСЯ. Сегодня (полная синхронная
-/// загрузка, Этап 3) этот сценарий уже безобидно покрывается сам —
-/// load_all_projects() молча роняет битый файл, а резолвинг активного
-/// индекса в main.rs откатывается на index 0 (реальный, уже загруженный
-/// проект). Эта функция понадобится на Этапе 5 — в Ветке Б остальные
-/// проекты будут только заглушками (tasks: None), переключиться на
-/// "другой проект" при ошибке будет физически некуда, показывать нечего.
-///
-/// manifest.is_empty() решает между двумя ветками:
-///   - манифест НЕ пуст (другие проекты есть, но это заглушки) → если
-///     last_project_id не смог прочитаться — сразу дефолтный, БЕЗ
-///     каскада по другим id манифеста (риск: при системной порче диска
-///     цепочка попыток может затянуть старт на неопределённое время).
-///     Если last_project_id вообще не задан (None, не порча данных, а
-///     его отсутствие) — ОДНА попытка (без цепочки) на первый id из
-///     манифеста, и только если она тоже не удалась — дефолтный.
-///   - манифест пуст → тривиальный случай, просто пробуем
-///     last_project_id, иначе сразу дефолтный.
-pub fn load_active_with_fallback(
-    manifest: &crate::manifest::Manifest,
-    last_project_id: Option<&str>,
-) -> LoadedProject {
-    if !manifest.is_empty() {
-        if let Some(id) = last_project_id {
-            return load_one(id).unwrap_or_else(create_default_project);
-        }
-        if let Some(first_id) = manifest.keys().next() {
-            if let Some(p) = load_one(first_id) {
-                return p;
-            }
-        }
-        return create_default_project();
-    }
+const STARTUP_LOAD_ATTEMPTS: usize = 3;
 
-    last_project_id
-        .and_then(load_one)
+/// Синхронно загружает активный проект на старте, с фолбэком для
+/// битого/отсутствующего файла. `preferred_id` — id, который юзер хочет
+/// видеть активным (последний открытый либо зафиксированный в настройках,
+/// см. Settings::preferred_project_id). Остальные кандидаты берутся из
+/// манифеста по order_key, пока не наберётся STARTUP_LOAD_ATTEMPTS попыток
+/// или кандидаты не кончатся; если ни один не прочитался — дефолтный Cue.
+pub fn load_active_with_fallback(
+    manifest:     &crate::manifest::Manifest,
+    preferred_id: Option<&str>,
+) -> LoadedProject {
+    let mut rest: Vec<&str> = manifest.keys()
+        .map(String::as_str)
+        .filter(|id| Some(*id) != preferred_id)
+        .collect();
+    rest.sort_by(|a, b| manifest[*a].order_key.partial_cmp(&manifest[*b].order_key)
+        .unwrap_or(std::cmp::Ordering::Equal));
+
+    preferred_id.into_iter().chain(rest)
+        .take(STARTUP_LOAD_ATTEMPTS)
+        .find_map(load_one)
         .unwrap_or_else(create_default_project)
+}
+
+/// Индекс активного проекта среди уже загруженных `projects` — либо
+/// предпочитаемый id из настроек (Settings::preferred_project_id), либо
+/// индекс 0. `None` только если `projects` пуст; создание дефолтного
+/// проекта в этом случае остаётся на вызывающей стороне.
+pub fn resolve_active_project(projects: &[LoadedProject], settings: &crate::settings::Settings) -> Option<usize> {
+    if projects.is_empty() { return None; }
+    Some(settings.preferred_project_id()
+        .and_then(|id| projects.iter().position(|p| p.id == id))
+        .unwrap_or(0))
 }
 
 pub fn load_all_projects() -> Vec<LoadedProject> {

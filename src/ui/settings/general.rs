@@ -1,7 +1,13 @@
 use eframe::egui::{self, Color32, RichText};
-use crate::settings::{NewTaskPos, Settings};
+use crate::settings::{NewTaskPos, Settings, StartupMode};
+use crate::project::LoadedProject;
 
-pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, sync: &mut crate::sync::SyncHandle) -> bool {
+pub fn draw(
+    ui:       &mut egui::Ui,
+    settings: &mut Settings,
+    sync:     &mut crate::sync::SyncHandle,
+    projects: &[LoadedProject],
+) -> bool {
     ui.add_space(14.0);
     ui.visuals_mut().selection.bg_fill = Color32::from_rgb(86, 111, 146);
 
@@ -69,7 +75,62 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, sync: &mut crate::sync::
         ui.label(RichText::new("Ставить на место главной задачи")
             .color(Color32::from_gray(190)).size(13.0));
     });
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        ui.label(RichText::new("При запуске:")
+            .color(Color32::from_white_alpha(120)).size(11.0));
+    });
     ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.add(egui::RadioButton::new(
+            settings.startup_mode == StartupMode::LastOpened, "")).clicked()
+        {
+            settings.startup_mode = StartupMode::LastOpened;
+            changed = true;
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Последний открытый проект")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        if ui.add(egui::RadioButton::new(
+            settings.startup_mode == StartupMode::Fixed, "")).clicked()
+        {
+            settings.startup_mode = StartupMode::Fixed;
+            changed = true;
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Всегда открывать:")
+            .color(Color32::from_gray(190)).size(13.0));
+    });
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.add_space(22.0);
+        ui.add_enabled_ui(settings.startup_mode == StartupMode::Fixed, |ui| {
+            let selected = settings.fixed_project_id.as_deref()
+                .and_then(|id| projects.iter().find(|p| p.id == id))
+                .or_else(|| projects.first());
+            let label = selected.map(|p| p.name.as_str()).unwrap_or("");
+            egui::ComboBox::from_id_salt("fixed_project")
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for p in projects {
+                        let is_sel = settings.fixed_project_id.as_deref() == Some(p.id.as_str());
+                        if ui.selectable_label(is_sel, p.name.as_str()).clicked() {
+                            settings.fixed_project_id = Some(p.id.clone());
+                            changed = true;
+                        }
+                    }
+                });
+        });
+    });
+
+    ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         // Не shared — чисто локальное предпочтение отображения, LWW не нужен.

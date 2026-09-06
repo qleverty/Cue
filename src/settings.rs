@@ -6,7 +6,7 @@ use super::BG;
 
 pub const SW: f32 = 300.0;
 
-pub const SH_GENERAL:  f32 = 270.0;
+pub const SH_GENERAL:  f32 = 360.0;
 pub const SH_PROJECTS: f32 = 160.0;
 pub const SH_SYNC:     f32 = 310.0;
 
@@ -19,6 +19,13 @@ pub enum NewTaskPos {
     Beginning,
 }
 
+#[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
+pub enum StartupMode {
+    #[default]
+    LastOpened,
+    Fixed,
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Settings {
     pub new_task_pos:     NewTaskPos,
@@ -29,6 +36,10 @@ pub struct Settings {
     pub replace_main_edited_at: u64,
     #[serde(default)]
     pub last_project_id:  Option<String>,
+    #[serde(default)]
+    pub startup_mode:     StartupMode,
+    #[serde(default)]
+    pub fixed_project_id: Option<String>,
     #[serde(default)]
     pub last_width:       Option<f32>,
     #[serde(default)]
@@ -76,6 +87,14 @@ impl Settings {
         self.replace_main_edited_at = ts;
         true
     }
+
+    pub fn preferred_project_id(&self) -> Option<&str> {
+        match self.startup_mode {
+            StartupMode::Fixed => self.fixed_project_id.as_deref()
+                .or(self.last_project_id.as_deref()),
+            StartupMode::LastOpened => self.last_project_id.as_deref(),
+        }
+    }
 }
 
 impl Default for Settings {
@@ -86,6 +105,8 @@ impl Default for Settings {
             replace_main:     false,
             replace_main_edited_at: 0,
             last_project_id:  None,
+            startup_mode:     StartupMode::LastOpened,
+            fixed_project_id: None,
             last_width:       None,
             last_pos:         None,
             group_inactive_at_end: true,
@@ -150,6 +171,7 @@ pub fn draw_settings_ui(
     settings: &mut Settings,
     state:    &mut SettingsUiState,
     sync:     &mut crate::sync::SyncHandle,
+    projects: &[crate::project::LoadedProject],
 ) -> (bool, f32) {
     let mut close = false;
 
@@ -259,7 +281,7 @@ pub fn draw_settings_ui(
 
     match state.tab {
         SettingsTab::General  =>
-            { crate::ui::settings::general::draw(ui, settings, sync); }
+            { crate::ui::settings::general::draw(ui, settings, sync, projects); }
         SettingsTab::Projects =>
             { crate::ui::settings::projects::draw(ui); }
         SettingsTab::Sync     =>
