@@ -2,6 +2,20 @@ use eframe::egui::{self, Color32, RichText};
 use crate::settings::{NewTaskPos, Settings, StartupMode};
 use crate::project::LoadedProject;
 
+/// Текст пункта настройки — не выделяется мышью (не текстовое поле), сам
+/// кликабелен (эквивалент клика по чекбоксу/радиокнопке рядом) и слегка
+/// подсвечивается при наведении.
+fn toggle_label(ui: &mut egui::Ui, text: &str) -> bool {
+    let base  = Color32::from_gray(190);
+    let hover = Color32::from_gray(230);
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(), egui::FontId::proportional(13.0), Color32::PLACEHOLDER,
+    );
+    let (rect, response) = ui.allocate_exact_size(galley.size(), egui::Sense::click());
+    ui.painter().galley(rect.min, galley, if response.hovered() { hover } else { base });
+    response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+}
+
 pub fn draw(
     ui:       &mut egui::Ui,
     settings: &mut Settings,
@@ -22,9 +36,11 @@ pub fn draw(
 
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if ui.add(egui::RadioButton::new(
-            settings.new_task_pos == NewTaskPos::End, "")).clicked()
-        {
+        let radio_clicked = ui.add(egui::RadioButton::new(
+            settings.new_task_pos == NewTaskPos::End, "")).clicked();
+        ui.add_space(4.0);
+        let label_clicked = toggle_label(ui, "Перемещать в конец списка");
+        if radio_clicked || label_clicked {
             let ts = crate::project::current_time();
             if settings.apply_new_task_pos(NewTaskPos::End, ts) {
                 let _ = sync.record_op(crate::sync::oplog::OpKind::SetSharedSetting {
@@ -34,16 +50,15 @@ pub fn draw(
             }
             changed = true;
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Перемещать в конец списка")
-            .color(Color32::from_gray(190)).size(13.0));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if ui.add(egui::RadioButton::new(
-            settings.new_task_pos == NewTaskPos::Beginning, "")).clicked()
-        {
+        let radio_clicked = ui.add(egui::RadioButton::new(
+            settings.new_task_pos == NewTaskPos::Beginning, "")).clicked();
+        ui.add_space(4.0);
+        let label_clicked = toggle_label(ui, "Перемещать в начало списка");
+        if radio_clicked || label_clicked {
             let ts = crate::project::current_time();
             if settings.apply_new_task_pos(NewTaskPos::Beginning, ts) {
                 let _ = sync.record_op(crate::sync::oplog::OpKind::SetSharedSetting {
@@ -53,15 +68,16 @@ pub fn draw(
             }
             changed = true;
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Перемещать в начало списка")
-            .color(Color32::from_gray(190)).size(13.0));
     });
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         let mut v = settings.replace_main;
-        if ui.checkbox(&mut v, "").changed() {
+        let checkbox_clicked = ui.checkbox(&mut v, "").changed();
+        ui.add_space(4.0);
+        let label_clicked = toggle_label(ui, "Ставить на место главной задачи");
+        if checkbox_clicked || label_clicked {
+            if label_clicked { v = !settings.replace_main; }
             let ts = crate::project::current_time();
             if settings.apply_replace_main(v, ts) {
                 let _ = sync.record_op(crate::sync::oplog::OpKind::SetSharedSetting {
@@ -71,9 +87,6 @@ pub fn draw(
             }
             changed = true;
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Ставить на место главной задачи")
-            .color(Color32::from_gray(190)).size(13.0));
     });
     ui.add_space(10.0);
     ui.horizontal(|ui| {
@@ -85,75 +98,68 @@ pub fn draw(
 
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if ui.add(egui::RadioButton::new(
-            settings.startup_mode == StartupMode::LastOpened, "")).clicked()
-        {
+        let radio_clicked = ui.add(egui::RadioButton::new(
+            settings.startup_mode == StartupMode::LastOpened, "")).clicked();
+        ui.add_space(4.0);
+        let label_clicked = toggle_label(ui, "Последний открытый проект");
+        if radio_clicked || label_clicked {
             settings.startup_mode = StartupMode::LastOpened;
             changed = true;
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Последний открытый проект")
-            .color(Color32::from_gray(190)).size(13.0));
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if ui.add(egui::RadioButton::new(
-            settings.startup_mode == StartupMode::Fixed, "")).clicked()
-        {
+        let radio_clicked = ui.add(egui::RadioButton::new(
+            settings.startup_mode == StartupMode::Fixed, "")).clicked();
+        ui.add_space(4.0);
+        let label_clicked = toggle_label(ui, "Всегда открывать:");
+        if radio_clicked || label_clicked {
             settings.startup_mode = StartupMode::Fixed;
             changed = true;
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("Всегда открывать:")
-            .color(Color32::from_gray(190)).size(13.0));
     });
     ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.add_space(22.0);
-        ui.add_enabled_ui(settings.startup_mode == StartupMode::Fixed, |ui| {
-            let selected = settings.fixed_project_id.as_deref()
-                .and_then(|id| projects.iter().find(|p| p.id == id))
-                .or_else(|| projects.first());
-            let label = selected.map(|p| p.name.as_str()).unwrap_or("");
-            egui::ComboBox::from_id_salt("fixed_project")
-                .selected_text(label)
-                .show_ui(ui, |ui| {
-                    for p in projects {
-                        let is_sel = settings.fixed_project_id.as_deref() == Some(p.id.as_str());
-                        if ui.selectable_label(is_sel, p.name.as_str()).clicked() {
-                            settings.fixed_project_id = Some(p.id.clone());
-                            changed = true;
-                        }
-                    }
-                });
-        });
-    });
+    if crate::ui::settings::projects_dropdown::draw(ui, settings, projects) {
+        changed = true;
+    }
 
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         // Не shared — чисто локальное предпочтение отображения, LWW не нужен.
-        if ui.checkbox(&mut settings.group_inactive_at_end, "").changed() { changed = true; }
+        let mut v = settings.group_inactive_at_end;
+        let checkbox_clicked = ui.checkbox(&mut v, "").changed();
         ui.add_space(4.0);
-        ui.label(RichText::new("Неактивные рутины — в конец списка")
-            .color(Color32::from_gray(190)).size(13.0));
+        let label_clicked = toggle_label(ui, "Неактивные рутины — в конец списка");
+        if checkbox_clicked || label_clicked {
+            settings.group_inactive_at_end = if label_clicked { !settings.group_inactive_at_end } else { v };
+            changed = true;
+        }
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if ui.checkbox(&mut settings.highlight_routines, "").changed() { changed = true; }
+        let mut v = settings.highlight_routines;
+        let checkbox_clicked = ui.checkbox(&mut v, "").changed();
         ui.add_space(4.0);
-        ui.label(RichText::new("Подсветка рутинных задач")
-            .color(Color32::from_gray(190)).size(13.0));
+        let label_clicked = toggle_label(ui, "Подсветка рутинных задач");
+        if checkbox_clicked || label_clicked {
+            settings.highlight_routines = if label_clicked { !settings.highlight_routines } else { v };
+            changed = true;
+        }
     });
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
-        if ui.checkbox(&mut settings.show_task_count, "").changed() { changed = true; }
+        let mut v = settings.show_task_count;
+        let checkbox_clicked = ui.checkbox(&mut v, "").changed();
         ui.add_space(4.0);
-        ui.label(RichText::new("Число задач в списке проектов")
-            .color(Color32::from_gray(190)).size(13.0));
+        let label_clicked = toggle_label(ui, "Число задач в списке проектов");
+        if checkbox_clicked || label_clicked {
+            settings.show_task_count = if label_clicked { !settings.show_task_count } else { v };
+            changed = true;
+        }
     });
 
     if changed { settings.save(); }
