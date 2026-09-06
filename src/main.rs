@@ -960,10 +960,12 @@ impl eframe::App for App {
                 let dropdown_pos   = egui::pos2(bar_rect.min.x + 5.0, dropdown_top_y);
 
                 const ROW_H: f32 = 17.0;
-                let font = egui::FontId::proportional(10.5);
+                let font       = egui::FontId::proportional(10.5);
+                let count_font = egui::FontId::proportional(9.0);
+                const COUNT_COL: Color32 = Color32::from_gray(95);
 
-                // +34 под "(999)" — с запасом, если включён счётчик задач,
-                // чтобы он не наезжал на крестик удаления справа.
+                // +34 под "(999)" — с запасом, для ширины ПОПАПА в целом (row_w
+                // общий на все строки, тут достаточно оценки на худший случай).
                 let count_reserve: f32 = if self.settings.show_task_count { 34.0 } else { 0.0 };
                 let row_w: f32 = {
                     let max_label_px = ctx.fonts_mut(|f| {
@@ -973,9 +975,8 @@ impl eframe::App for App {
                             ).size().x)
                             .fold(0.0_f32, f32::max)
                     });
-                    (max_label_px + 37.0 + count_reserve).clamp(150.0, self.w - 16.0)
+                    (max_label_px + 37.0 + count_reserve).clamp(150.0, self.w - 75.0)
                 };
-                let text_avail = row_w - 15.0 - 4.0 - 18.0 - count_reserve;
 
                 let project_adding     = self.project_adding;
                 let project_need_focus = self.project_need_focus;
@@ -1027,30 +1028,38 @@ impl eframe::App for App {
                                                 rr.min + vec2(7.0, ROW_H / 2.0),
                                                 3.0, proj.color);
 
+                                            // Реальная ширина счётчика ЭТОЙ строки (не общая
+                                            // догадка на "(999)") — раз он теперь прижат к концу
+                                            // имени, а не к правому краю, резерв под него должен
+                                            // быть точным, иначе между ним и крестиком остаётся
+                                            // пустой промежуток при коротких числах.
+                                            let count_text = format!("({})", proj.task_count);
+                                            let count_w = if self.settings.show_task_count {
+                                                ctx.fonts_mut(|f| f.layout_no_wrap(
+                                                    count_text.clone(), count_font.clone(), COUNT_COL,
+                                                ).size().x) + 4.0
+                                            } else { 0.0 };
+                                            let text_avail = row_w - 15.0 - 4.0 - 18.0 - count_w;
+
                                             let mut job = egui::text::LayoutJob::simple_singleline(
                                                 proj.name.clone(), font.clone(), label_col);
                                             job.wrap.max_width         = text_avail;
                                             job.wrap.max_rows          = 1;
                                             job.wrap.overflow_character = Some('…');
                                             let galley = ctx.fonts_mut(|f| f.layout_job(job));
+                                            let name_w = galley.size().x;
                                             ui.painter().galley(
                                                 rr.min + vec2(15.0, (ROW_H - galley.size().y) / 2.0),
                                                 galley, label_col);
 
-                                            // Счётчик — только в этом списке (свитчере), не в
-                                            // шапке с текущим проектом. Прижат к правому краю
-                                            // (перед зоной крестика удаления), а не приклеен к
-                                            // имени — иначе при truncate он бы "прыгал" по X в
-                                            // зависимости от фактической длины имени.
                                             if self.settings.show_task_count {
-                                                let count_text = format!("({})", proj.task_count);
                                                 let count_job = egui::text::LayoutJob::simple_singleline(
-                                                    count_text, font.clone(), Color32::from_gray(120));
+                                                    count_text, count_font.clone(), COUNT_COL);
                                                 let count_galley = ctx.fonts_mut(|f| f.layout_job(count_job));
-                                                let x = rr.min.x + row_w - 22.0 - count_galley.size().x;
+                                                let x = rr.min.x + 15.0 + name_w + 4.0;
                                                 ui.painter().galley(
                                                     egui::pos2(x, rr.min.y + (ROW_H - count_galley.size().y) / 2.0),
-                                                    count_galley, Color32::from_gray(120));
+                                                    count_galley, COUNT_COL);
                                             }
 
                                             let name_rect = egui::Rect::from_min_size(

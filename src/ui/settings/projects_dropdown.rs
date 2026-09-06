@@ -7,14 +7,17 @@ fn bg_hover()     -> Color32 { Color32::from_white_alpha(13) }
 fn text()         -> Color32 { Color32::from_gray(190) }
 fn border()       -> Color32 { Color32::from_rgb(0x23, 0x23, 0x23) }
 fn border_hover() -> Color32 { Color32::from_rgb(0x65, 0x65, 0x65) }
+fn popup_bg()     -> Color32 { Color32::from_rgba_unmultiplied(0x18, 0x18, 0x18, 220) }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let head: String = s.chars().take(max.saturating_sub(3)).collect();
-        format!("{head}...")
-    }
+/// Обрезает текст по фактической ширине в пикселях (текущий шрифт), а не
+/// по числу символов — так же, как список проектов в главной панели
+/// (main.rs, "…" через LayoutJob.wrap.overflow_character).
+fn truncate_to_width(text: &str, font: egui::FontId, color: Color32, max_width: f32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+    job.wrap.max_width          = max_width;
+    job.wrap.max_rows           = 1;
+    job.wrap.overflow_character = Some('…');
+    job
 }
 
 pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProject]) -> bool {
@@ -39,9 +42,9 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
                 .and_then(|id| projects.iter().find(|p| p.id == id))
                 .or_else(|| projects.first());
             let label = selected.map(|p| p.name.as_str()).unwrap_or("");
-            let label = truncate(label, 23);
             let combo = egui::ComboBox::from_id_salt("fixed_project")
                 .width(220.0)
+                .truncate()
                 .selected_text(label)
                 .icon(|ui, rect, visuals, _is_open| {
                     let rect = egui::Rect::from_center_size(
@@ -55,7 +58,7 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
                     ));
                 })
                 .popup_style(egui::style::StyleModifier::new(|style: &mut egui::Style| {
-                    style.visuals.window_fill        = Color32::from_rgba_unmultiplied(0x2a, 0x2a, 0x2a, 220);
+                    style.visuals.window_fill        = popup_bg();
                     style.visuals.window_stroke       = Stroke::NONE;
                     style.visuals.menu_corner_radius   = 6.0.into();
                     style.spacing.menu_margin         = egui::Margin::same(4);
@@ -75,8 +78,9 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
                         let col = if is_sel || resp.hovered() { Color32::WHITE } else { text() };
                         ui.painter().circle_filled(
                             rect.min + egui::vec2(7.0, ROW_H / 2.0), 3.0, p.color);
-                        let galley = ui.painter().layout_no_wrap(
-                            truncate(&p.name, 23), row_font.clone(), col);
+                        let text_avail = (row_w - 15.0 - 4.0).max(0.0);
+                        let job = truncate_to_width(&p.name, row_font.clone(), col, text_avail);
+                        let galley = ui.ctx().fonts_mut(|f| f.layout_job(job));
                         ui.painter().galley(
                             rect.min + egui::vec2(15.0, (ROW_H - galley.size().y) / 2.0), galley, col);
                         if resp.clicked() {
