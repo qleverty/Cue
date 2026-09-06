@@ -41,6 +41,7 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
             let label = selected.map(|p| p.name.as_str()).unwrap_or("");
             let label = truncate(label, 23);
             let combo = egui::ComboBox::from_id_salt("fixed_project")
+                .width(220.0)
                 .selected_text(label)
                 .icon(|ui, rect, visuals, _is_open| {
                     let rect = egui::Rect::from_center_size(
@@ -53,10 +54,32 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
                         Stroke::NONE,
                     ));
                 })
+                .popup_style(egui::style::StyleModifier::new(|style: &mut egui::Style| {
+                    style.visuals.window_fill        = Color32::from_rgba_unmultiplied(0x2a, 0x2a, 0x2a, 220);
+                    style.visuals.window_stroke       = Stroke::NONE;
+                    style.visuals.menu_corner_radius   = 6.0.into();
+                    style.spacing.menu_margin         = egui::Margin::same(4);
+                }))
                 .show_ui(ui, |ui| {
+                    const ROW_H: f32 = 17.0;
+                    let row_font = egui::FontId::proportional(10.5);
+                    ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
                     for p in projects {
                         let is_sel = settings.fixed_project_id.as_deref() == Some(p.id.as_str());
-                        if ui.selectable_label(is_sel, p.name.as_str()).clicked() {
+                        let row_w  = ui.available_width();
+                        let (rect, resp) = ui.allocate_exact_size(
+                            egui::vec2(row_w, ROW_H), egui::Sense::click());
+                        if resp.hovered() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        }
+                        let col = if is_sel || resp.hovered() { Color32::WHITE } else { text() };
+                        ui.painter().circle_filled(
+                            rect.min + egui::vec2(7.0, ROW_H / 2.0), 3.0, p.color);
+                        let galley = ui.painter().layout_no_wrap(
+                            truncate(&p.name, 23), row_font.clone(), col);
+                        ui.painter().galley(
+                            rect.min + egui::vec2(15.0, (ROW_H - galley.size().y) / 2.0), galley, col);
+                        if resp.clicked() {
                             settings.fixed_project_id = Some(p.id.clone());
                             changed = true;
                         }
