@@ -7,7 +7,7 @@ fn bg_hover()     -> Color32 { Color32::from_white_alpha(13) }
 fn text()         -> Color32 { Color32::from_gray(190) }
 fn border()       -> Color32 { Color32::from_rgb(0x23, 0x23, 0x23) }
 fn border_hover() -> Color32 { Color32::from_rgb(0x65, 0x65, 0x65) }
-fn popup_bg()     -> Color32 { Color32::from_rgba_unmultiplied(0x18, 0x18, 0x18, 220) }
+fn popup_bg()     -> Color32 { Color32::from_rgba_unmultiplied(0x09, 0x09, 0x09, 220) }
 
 /// Обрезает текст по фактической ширине в пикселях (текущий шрифт), а не
 /// по числу символов — так же, как список проектов в главной панели
