@@ -268,6 +268,7 @@ struct App {
     projects:              Vec<project::LoadedProject>,
     active_project_idx:    usize,
     project_open:          bool,
+    project_dropdown_h:    f32,
     project_adding:        bool,
     project_buf:           String,
     project_need_focus:    bool,
@@ -430,6 +431,7 @@ impl App {
             projects,
             active_project_idx:    active_idx,
             project_open:          false,
+            project_dropdown_h:    0.0,
             project_adding:        false,
             project_buf:           String::new(),
             project_need_focus:    false,
@@ -856,9 +858,10 @@ impl eframe::App for App {
             let (close, target_h) = settings::draw_settings_ui(
                 &ctx, ui, &mut self.settings, &mut self.settings_ui, &mut self.sync, &self.projects,
             );
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                vec2(settings::SW, target_h),
-            ));
+            let size = vec2(settings::SW, target_h);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
             if close {
                 self.screen = Screen::Main;
                 self.last_h = 0.0;
@@ -868,9 +871,10 @@ impl eframe::App for App {
 
         if let Screen::Routine = self.screen {
             let action = ui::routine::draw(&ctx, ui, &mut self.routine_ui);
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                vec2(ui::routine::RW, self.routine_ui.target_height()),
-            ));
+            let size = vec2(ui::routine::RW, self.routine_ui.target_height());
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
             if let ui::routine::CloseAction::Close = action {
                 self.commit_routine_editor();
                 self.screen = Screen::Main;
@@ -901,7 +905,16 @@ impl eframe::App for App {
 
         if (h - self.last_h).abs() > 0.5 {
             self.last_h = h;
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(self.w, h)));
+            let size = vec2(self.w, h);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            // При resizable(false) некоторые бэкенды winit внутренне фиксируют
+            // min/max_inner_size на текущем размере при создании окна и не
+            // обновляют их при последующих программных ресайзах — из-за этого
+            // сжаться окно может, а вырасти обратно после — не всегда. Явно
+            // подтягиваем оба ограничения к тому же размеру при каждом ресайзе,
+            // чтобы не застрять на случайно зафиксированном старом максимуме.
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
         }
 
         ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
@@ -956,7 +969,21 @@ impl eframe::App for App {
 
             if self.project_open {
                 let dropdown_top_y = bar_rect.min.y + 14.0;
-                let available_h    = (self.last_h - dropdown_top_y - 10.0).max(40.0);
+                // Не self.last_h — это наше СОБСТВЕННОЕ предположение о высоте окна (то,
+                // что мы запросили через InnerSize), а не подтверждённый факт. Если ОС
+                // почему-то не применила предыдущий ресайз (напр. смена проекта на более
+                // высокий сразу после короткого) — self.last_h расходится с реальностью,
+                // и панель кроилась по воображаемой, а не по настоящей высоте окна.
+                // Берём фактическую высоту вьюпорта напрямую, на каждый кадр.
+                let live_h = ctx.input(|i| i.viewport().inner_rect.map(|r| r.height()))
+                    .unwrap_or(self.last_h);
+                // Frame ниже добавляет margin(4) сверху И снизу поверх ScrollArea — раньше
+                // это не учитывалось, и "зазор" в 10px внизу окна почти целиком съедался
+                // этой рамкой. Явно вычитаем оба margin'а + отдельный видимый зазор до низа.
+                const FRAME_MARGIN: f32 = 4.0;
+                const BOTTOM_GAP:   f32 = 4.0;
+                let available_h = (live_h - dropdown_top_y - FRAME_MARGIN * 2.0 - BOTTOM_GAP)
+                    .max(40.0);
                 let dropdown_pos   = egui::pos2(bar_rect.min.x + 5.0, dropdown_top_y);
 
                 const ROW_H: f32 = 17.0;
@@ -975,7 +1002,18 @@ impl eframe::App for App {
                             ).size().x)
                             .fold(0.0_f32, f32::max)
                     });
-                    (max_label_px + 37.0 + count_reserve).clamp(150.0, self.w - 75.0)
+                    {
+                        // clamp паникует, если min > max — а min(150.0) больше max(self.w-75.0)
+                        // ровно тогда, когда окно сузили меньше ~225px. В этом случае панели
+                        // просто некуда деваться, кроме как занять всю доступную ширину окна,
+                        // а не крашиться.
+                        let max_w = self.w - 75.0;
+                        if max_w < 150.0 {
+                            max_w.max(40.0)
+                        } else {
+                            (max_label_px + 37.0 + count_reserve).clamp(150.0, max_w)
+                        }
+                    }
                 };
 
                 let project_adding     = self.project_adding;
@@ -988,9 +1026,20 @@ impl eframe::App for App {
                 let mut delete_project: Option<usize> = None;
                 let mut open_settings              = false;
 
+                let force_sizing_pass = (available_h - self.project_dropdown_h).abs() > 0.5;
+                self.project_dropdown_h = available_h;
+
                 let area_resp = egui::Area::new(egui::Id::new("project_dropdown"))
                     .fixed_pos(dropdown_pos)
                     .order(egui::Order::Foreground)
+                    // У Area — персистентный (по Id) кэш измеренного размера, который
+                    // становится ПОТОЛКОМ для следующего показа. Если available_h с
+                    // прошлого раза изменилась (сменили проект/резайзнули окно) — этот
+                    // старый потолок может быть меньше нужного и контент молча в него
+                    // упрётся, а измеренный (уже подрезанный) размер снова осядет как
+                    // новый потолок — раз сжавшись, сам не вырастет. Форсируем честный
+                    // sizing_pass именно в кадры, когда available_h реально сменилась.
+                    .sizing_pass(force_sizing_pass)
                     .show(&ctx, |ui| {
                         egui::Frame::new()
                             .fill(Color32::from_rgba_premultiplied(0, 0, 0, 220))
@@ -1008,9 +1057,32 @@ impl eframe::App for App {
                                         for (i, proj) in self.projects.iter().enumerate() {
                                             let is_active = self.active_project_idx == i;
 
-                                            let (rr, rr_resp) = ui.allocate_exact_size(
+                                            let (rr, _) = ui.allocate_exact_size(
                                                 vec2(row_w, ROW_H), Sense::hover());
-                                            if rr_resp.hovered() {
+
+                                            // Кликабельные зоны регистрируем ДО покраски — иначе
+                                            // текст красился по отдельному Sense::hover()-виджету
+                                            // (rr), который целиком перекрыт этими же
+                                            // Sense::click()-зонами и в hit-test'е egui никогда не
+                                            // выигрывает против них (click-зоны в приоритете), так
+                                            // что подсветка физически не могла включиться.
+                                            let name_rect = egui::Rect::from_min_size(
+                                                rr.min,
+                                                vec2(row_w - 18.0, ROW_H),
+                                            );
+                                            let name_resp = ui.allocate_rect(name_rect, Sense::click());
+
+                                            let has_cross = self.projects.len() > 1;
+                                            let del_rect = egui::Rect::from_min_size(
+                                                rr.min + vec2(row_w - 16.5, (ROW_H - 15.0) / 2.0),
+                                                vec2(15.0, 15.0),
+                                            );
+                                            let del_resp = has_cross
+                                                .then(|| ui.allocate_rect(del_rect, Sense::click()));
+
+                                            if name_resp.hovered()
+                                                || del_resp.as_ref().is_some_and(egui::Response::hovered)
+                                            {
                                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
 
@@ -1018,7 +1090,7 @@ impl eframe::App for App {
                                             // (фоновую плашку-подсветку убрали — при таких низких
                                             // альфах она была практически незаметна; вместо неё
                                             // сигналит сам цвет текста).
-                                            let label_col = if is_active || rr_resp.hovered() {
+                                            let label_col = if is_active || name_resp.hovered() {
                                                 Color32::WHITE
                                             } else {
                                                 Color32::from_gray(190)
@@ -1062,26 +1134,12 @@ impl eframe::App for App {
                                                     count_galley, COUNT_COL);
                                             }
 
-                                            let name_rect = egui::Rect::from_min_size(
-                                                rr.min,
-                                                vec2(row_w - 18.0, ROW_H),
-                                            );
-                                            let name_resp = ui.allocate_rect(name_rect, Sense::click());
-                                            if name_resp.hovered() {
-                                                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                                            }
                                             if name_resp.clicked() {
                                                 select_project = Some(i);
                                             }
 
-                                            if self.projects.len() > 1 {
-                                                let del_rect = egui::Rect::from_min_size(
-                                                    rr.min + vec2(row_w - 16.5, (ROW_H - 15.0) / 2.0),
-                                                    vec2(15.0, 15.0),
-                                                );
-                                                let del_resp = ui.allocate_rect(del_rect, Sense::click());
+                                            if let Some(del_resp) = del_resp {
                                                 let cross_tint = if del_resp.hovered() {
-                                                    ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                                     Color32::WHITE
                                                 } else {
                                                     Color32::from_gray(130)
@@ -1247,9 +1305,10 @@ impl eframe::App for App {
                     self.project_adding = false;
                     self.project_buf.clear();
                     self.screen = Screen::Settings;
-                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                        vec2(settings::SW, settings::SH_GENERAL),
-                    ));
+                    let size = vec2(settings::SW, settings::SH_GENERAL);
+                    ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                    ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+                    ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
                 }
 
                 if !self.project_adding
@@ -1957,9 +2016,10 @@ impl eframe::App for App {
                     self.routine_ui.load(task_id, task_name, routine.as_ref());
                 }
                 self.screen = Screen::Routine;
-                ctx.send_viewport_cmd(ViewportCommand::InnerSize(
-                    vec2(ui::routine::RW, self.routine_ui.target_height()),
-                ));
+                let size = vec2(ui::routine::RW, self.routine_ui.target_height());
+                ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+                ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+                ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
             }
             if let Some(i) = delete {
                 let is_active_routine = self.projects[idx].subs.get_index(i)
@@ -2084,7 +2144,10 @@ impl eframe::App for App {
         if right_resp.dragged() {
             let delta = right_resp.drag_delta().x;
             self.w = (self.w + delta).max(MIN_W);
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(self.w, h)));
+            let size = vec2(self.w, h);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
         }
 
         if left_resp.dragged() {
@@ -2097,7 +2160,10 @@ impl eframe::App for App {
                     egui::pos2(outer.min.x + x_shift, outer.min.y),
                 ));
             }
-            ctx.send_viewport_cmd(ViewportCommand::InnerSize(vec2(self.w, h)));
+            let size = vec2(self.w, h);
+            ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
+            ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
         }
 
         {
