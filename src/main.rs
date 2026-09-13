@@ -268,6 +268,9 @@ struct App {
     projects:              Vec<project::LoadedProject>,
     active_project_idx:    usize,
     project_open:          bool,
+    project_keyboard_focus:    Option<usize>,
+    project_focus_is_keyboard: bool,
+    project_focus_bias:        f32,
     project_dropdown_h:    f32,
     project_adding:        bool,
     project_buf:           String,
@@ -431,6 +434,9 @@ impl App {
             projects,
             active_project_idx:    active_idx,
             project_open:          false,
+            project_keyboard_focus:    None,
+            project_focus_is_keyboard: false,
+            project_focus_bias:        0.5,
             project_dropdown_h:    0.0,
             project_adding:        false,
             project_buf:           String::new(),
@@ -959,9 +965,21 @@ impl eframe::App for App {
                 p.circle_filled(c + vec2(x, 4.0), 1.5, Color32::from_white_alpha(35));
             }
 
-            if cue_resp.clicked() {
+            let tab_pressed = ctx.input(|i| i.key_pressed(egui::Key::Tab));
+            if tab_pressed {
+                // Коммитим любое активное поле ввода (добавление/редактирование задачи —
+                // у них уже есть commit-on-lost_focus логика ниже по кадру, просто триггерим
+                // её сами). Переименование/добавление проекта — отдельный случай: оно и
+                // так уже отбрасывается при закрытии панели существующим кодом ниже.
+                ctx.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
+            }
+
+            if cue_resp.clicked() || tab_pressed {
                 self.project_open = !self.project_open;
-                if !self.project_open {
+                if self.project_open {
+                    self.project_keyboard_focus = None;
+                    self.project_focus_bias     = 0.5;
+                } else {
                     self.project_adding = false;
                     self.project_buf.clear();
                 }
@@ -1026,6 +1044,39 @@ impl eframe::App for App {
                 let mut delete_project: Option<usize> = None;
                 let mut open_settings              = false;
 
+                // Клавиатурная навигация по списку — кольцом, только по реальным
+                // проектам (не задевает "Добавить"/"Настройки"). Любая стрелка забирает
+                // приоритет подсветки у мыши; любое движение мыши возвращает его обратно.
+                let n = self.projects.len();
+                let arrow_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
+                let arrow_up   = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
+                if arrow_down || arrow_up {
+                    self.project_focus_is_keyboard = true;
+                    self.project_keyboard_focus = Some(match (self.project_keyboard_focus, arrow_down) {
+                        (None, true)     => 0,
+                        (None, false)    => n.saturating_sub(1),
+                        (Some(i), true)  => (i + 1) % n,
+                        (Some(i), false) => (i + n - 1) % n,
+                    });
+                    // Не резкий переброс 0.3<->0.7 при развороте направления — плавно
+                    // подтягиваем текущий bias к нужному полюсу; при устойчивом листании
+                    // в одну сторону за пару нажатий сам сойдётся к полюсу, а при развороте
+                    // на одно нажатие лишь слегка отступит, а не прыгнет на другой край.
+                    let target = if arrow_down { 0.7 } else { 0.3 };
+                    self.project_focus_bias += (target - self.project_focus_bias) * 0.35;
+                }
+                if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
+                    self.project_focus_is_keyboard = false;
+                }
+                // Enter подтверждает именно клавиатурный фокус (не то, что параллельно
+                // подсвечено мышью) — и не должен сработать, пока в панели уже открыто
+                // поле добавления/переименования проекта (там Enter — для него).
+                if !project_adding && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    if let Some(i) = self.project_keyboard_focus {
+                        select_project = Some(i);
+                    }
+                }
+
                 let force_sizing_pass = (available_h - self.project_dropdown_h).abs() > 0.5;
                 self.project_dropdown_h = available_h;
 
@@ -1086,15 +1137,36 @@ impl eframe::App for App {
                                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
 
-                                            // Белый — если проект активен ИЛИ наведён курсором
-                                            // (фоновую плашку-подсветку убрали — при таких низких
-                                            // альфах она была практически незаметна; вместо неё
-                                            // сигналит сам цвет текста).
-                                            let label_col = if is_active || name_resp.hovered() {
+                                            // Белый — если проект активен, ИЛИ наведён курсором
+                                            // (когда приоритет у мыши), ИЛИ под клавиатурным
+                                            // фокусом (когда приоритет у клавиатуры) — источники
+                                            // взаимоисключающие, см. project_focus_is_keyboard
+                                            // выше: последний подвигавшийся ввод и выигрывает.
+                                            let kb_focused = self.project_focus_is_keyboard
+                                                && self.project_keyboard_focus == Some(i);
+                                            let mouse_focused = !self.project_focus_is_keyboard
+                                                && name_resp.hovered();
+                                            let label_col = if is_active || kb_focused || mouse_focused {
                                                 Color32::WHITE
                                             } else {
                                                 Color32::from_gray(190)
                                             };
+
+                                            if kb_focused && (arrow_down || arrow_up) {
+                                                // Целимся не в геометрический центр (0.5), а в
+                                                // project_focus_bias высоты видимой области сверху —
+                                                // плавно ползущее значение (см. обновление выше по
+                                                // кадру), а не жёсткий 0.7/0.3, чтобы разворот
+                                                // направления не дёргал скролл рывком.
+                                                let delta_y = (0.5 - self.project_focus_bias) * available_h;
+                                                let scroll_target = rr.translate(egui::vec2(0.0, delta_y));
+                                                ui.scroll_to_rect_animation(
+                                                    scroll_target, Some(egui::Align::Center),
+                                                    egui::style::ScrollAnimation::new(
+                                                        400.0, egui::Rangef::new(0.15, 0.4),
+                                                    ),
+                                                );
+                                            }
 
                                             ui.painter().circle_filled(
                                                 rr.min + vec2(7.0, ROW_H / 2.0),
