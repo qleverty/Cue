@@ -1080,6 +1080,22 @@ impl eframe::App for App {
                 let force_sizing_pass = (available_h - self.project_dropdown_h).abs() > 0.5;
                 self.project_dropdown_h = available_h;
 
+                // Своя ручная плавная прокрутка вместо ui.scroll_to_rect_animation —
+                // у встроенного варианта при быстрой повторной смене цели анимация не
+                // перезапускается, а тянет за собой старый (уже почти истёкший) таймер,
+                // отсюда рывок. animate_value_with_time честно стартует новую интерполяцию
+                // от текущей, уже проигранной позиции — быстрые повторные нажатия просто
+                // плавно перенацеливаются на лету.
+                let target_scroll_y = self.project_keyboard_focus.map(|idx| {
+                    let row_center = idx as f32 * (ROW_H + 1.0) + ROW_H / 2.0;
+                    row_center - self.project_focus_bias * available_h
+                });
+                let animated_scroll_y = target_scroll_y.map(|target| {
+                    ctx.animate_value_with_time(
+                        egui::Id::new("project_dropdown_scroll_y"), target, 0.2,
+                    )
+                });
+
                 let area_resp = egui::Area::new(egui::Id::new("project_dropdown"))
                     .fixed_pos(dropdown_pos)
                     .order(egui::Order::Foreground)
@@ -1097,12 +1113,15 @@ impl eframe::App for App {
                             .corner_radius(6.0)
                             .inner_margin(egui::Margin::same(4))
                             .show(ui, |ui| {
-                                egui::ScrollArea::vertical()
+                                let mut scroll_area = egui::ScrollArea::vertical()
                                     .max_height(available_h)
                                     .auto_shrink([true, true])
                                     .scroll_bar_visibility(
-                                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
-                                    .show(ui, |ui| {
+                                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
+                                if let Some(y) = animated_scroll_y {
+                                    scroll_area = scroll_area.vertical_scroll_offset(y);
+                                }
+                                scroll_area.show(ui, |ui| {
                                         ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
 
                                         for (i, proj) in self.projects.iter().enumerate() {
@@ -1151,22 +1170,6 @@ impl eframe::App for App {
                                             } else {
                                                 Color32::from_gray(190)
                                             };
-
-                                            if kb_focused && (arrow_down || arrow_up) {
-                                                // Целимся не в геометрический центр (0.5), а в
-                                                // project_focus_bias высоты видимой области сверху —
-                                                // плавно ползущее значение (см. обновление выше по
-                                                // кадру), а не жёсткий 0.7/0.3, чтобы разворот
-                                                // направления не дёргал скролл рывком.
-                                                let delta_y = (0.5 - self.project_focus_bias) * available_h;
-                                                let scroll_target = rr.translate(egui::vec2(0.0, delta_y));
-                                                ui.scroll_to_rect_animation(
-                                                    scroll_target, Some(egui::Align::Center),
-                                                    egui::style::ScrollAnimation::new(
-                                                        400.0, egui::Rangef::new(0.15, 0.4),
-                                                    ),
-                                                );
-                                            }
 
                                             ui.painter().circle_filled(
                                                 rr.min + vec2(7.0, ROW_H / 2.0),
