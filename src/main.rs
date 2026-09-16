@@ -1046,6 +1046,19 @@ impl eframe::App for App {
                 let mut delete_project: Option<usize> = None;
                 let mut open_settings              = false;
 
+                // Мышиный режим включает не только движение курсора, но и колесо —
+                // если крутить колесо, не двигая саму мышь, pointer.delta() остаётся
+                // нулевым, а мы должны всё равно уступить приоритет мыши, иначе
+                // принудительный vertical_scroll_offset() будет "пружинить" скролл
+                // колеса обратно к клавиатурной цели. Идёт ДО блока стрелок — стрелка
+                // на своём кадре обязана перебивать остаточную мышиную активность
+                // (например мышь чуть дрогнула секунду назад), а не наоборот.
+                let mouse_active = ctx.input(|i|
+                    i.pointer.delta() != egui::Vec2::ZERO || i.smooth_scroll_delta != egui::Vec2::ZERO);
+                if mouse_active {
+                    self.project_focus_is_keyboard = false;
+                }
+
                 // Клавиатурная навигация по списку — кольцом, только по реальным
                 // проектам (не задевает "Добавить"/"Настройки"). Любая стрелка забирает
                 // приоритет подсветки у мыши; любое движение мыши возвращает его обратно.
@@ -1065,11 +1078,9 @@ impl eframe::App for App {
                     // в одну сторону за пару нажатий сам сойдётся к полюсу, а при развороте
                     // на одно нажатие лишь слегка отступит, а не прыгнет на другой край.
                     let target = if arrow_down { 0.7 } else { 0.3 };
-                    self.project_focus_bias += (target - self.project_focus_bias) * 0.35;
+                    self.project_focus_bias += (target - self.project_focus_bias) * 0.6;
                 }
-                if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
-                    self.project_focus_is_keyboard = false;
-                }
+
                 // Enter подтверждает именно клавиатурный фокус (не то, что параллельно
                 // подсвечено мышью) — и не должен сработать, пока в панели уже открыто
                 // поле добавления/переименования проекта (там Enter — для него).
@@ -1089,7 +1100,7 @@ impl eframe::App for App {
                 // старт, плавное затухание к цели, никакого разгона в начале. EXP_TIME меньше
                 // дефолтных 0.1с egui — тебе хотелось быстрее.
                 const EXP_REACH: f32 = 0.90;
-                const EXP_TIME:  f32 = 0.06;
+                const EXP_TIME:  f32 = 0.035;
 
                 let n_f = self.projects.len() as f32;
                 let content_h = n_f * ROW_H + (n_f - 1.0).max(0.0);
@@ -1107,6 +1118,11 @@ impl eframe::App for App {
                             let dt = ctx.input(|i| i.stable_dt);
                             let t  = 1.0 - (1.0 - EXP_REACH).powf(dt / EXP_TIME);
                             self.project_scroll_offset += t * remaining;
+                            // Без этого кадры между "доездами" случаются только когда
+                            // перерисовку попросит что-то ДРУГОЕ (в приложении дефолтный
+                            // пульс — раз в секунду, см. request_repaint_after ниже по
+                            // файлу) — анимация двигалась рывками вместо плавных ~60 fps.
+                            ctx.request_repaint();
                         }
                     }
                 }
