@@ -271,6 +271,7 @@ struct App {
     project_keyboard_focus:    Option<usize>,
     project_focus_is_keyboard: bool,
     project_focus_bias:        f32,
+    project_scroll_offset:     f32,
     project_dropdown_h:    f32,
     project_adding:        bool,
     project_buf:           String,
@@ -437,6 +438,7 @@ impl App {
             project_keyboard_focus:    None,
             project_focus_is_keyboard: false,
             project_focus_bias:        0.5,
+            project_scroll_offset:     0.0,
             project_dropdown_h:    0.0,
             project_adding:        false,
             project_buf:           String::new(),
@@ -1080,21 +1082,35 @@ impl eframe::App for App {
                 let force_sizing_pass = (available_h - self.project_dropdown_h).abs() > 0.5;
                 self.project_dropdown_h = available_h;
 
-                // Своя ручная плавная прокрутка вместо ui.scroll_to_rect_animation —
-                // у встроенного варианта при быстрой повторной смене цели анимация не
-                // перезапускается, а тянет за собой старый (уже почти истёкший) таймер,
-                // отсюда рывок. animate_value_with_time честно стартует новую интерполяцию
-                // от текущей, уже проигранной позиции — быстрые повторные нажатия просто
-                // плавно перенацеливаются на лету.
-                let target_scroll_y = self.project_keyboard_focus.map(|idx| {
-                    let row_center = idx as f32 * (ROW_H + 1.0) + ROW_H / 2.0;
-                    row_center - self.project_focus_bias * available_h
-                });
-                let animated_scroll_y = target_scroll_y.map(|target| {
-                    ctx.animate_value_with_time(
-                        egui::Id::new("project_dropdown_scroll_y"), target, 0.2,
-                    )
-                });
+                // Ручная прокрутка вместо ui.scroll_to_rect_animation/animate_value_with_time —
+                // повторяем ТОЧНО ту же кривую, что использует сам egui для сглаживания
+                // колеса мыши (input_state/wheel_state.rs): экспоненциальное угасание
+                // остатка дистанции, "дойти до 90% за EXP_TIME секунд" каждый кадр — быстрый
+                // старт, плавное затухание к цели, никакого разгона в начале. EXP_TIME меньше
+                // дефолтных 0.1с egui — тебе хотелось быстрее.
+                const EXP_REACH: f32 = 0.90;
+                const EXP_TIME:  f32 = 0.06;
+
+                let n_f = self.projects.len() as f32;
+                let content_h = n_f * ROW_H + (n_f - 1.0).max(0.0);
+                let max_scroll = (content_h - available_h).max(0.0);
+
+                if self.project_focus_is_keyboard {
+                    if let Some(idx) = self.project_keyboard_focus {
+                        let row_center = idx as f32 * (ROW_H + 1.0) + ROW_H / 2.0;
+                        let target = (row_center - self.project_focus_bias * available_h)
+                            .clamp(0.0, max_scroll);
+                        let remaining = target - self.project_scroll_offset;
+                        if remaining.abs() < 1.0 {
+                            self.project_scroll_offset = target;
+                        } else {
+                            let dt = ctx.input(|i| i.stable_dt);
+                            let t  = 1.0 - (1.0 - EXP_REACH).powf(dt / EXP_TIME);
+                            self.project_scroll_offset += t * remaining;
+                        }
+                    }
+                }
+                self.project_scroll_offset = self.project_scroll_offset.clamp(0.0, max_scroll);
 
                 let area_resp = egui::Area::new(egui::Id::new("project_dropdown"))
                     .fixed_pos(dropdown_pos)
@@ -1118,8 +1134,8 @@ impl eframe::App for App {
                                     .auto_shrink([true, true])
                                     .scroll_bar_visibility(
                                         egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded);
-                                if let Some(y) = animated_scroll_y {
-                                    scroll_area = scroll_area.vertical_scroll_offset(y);
+                                if self.project_focus_is_keyboard {
+                                    scroll_area = scroll_area.vertical_scroll_offset(self.project_scroll_offset);
                                 }
                                 scroll_area.show(ui, |ui| {
                                         ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
@@ -1323,9 +1339,17 @@ impl eframe::App for App {
                                             font.clone(),
                                             Color32::from_gray(160),
                                         );
-                                    });
-                            });
+                                    })
+                            })
                     });
+
+                // Синхронизируем нашу отслеживаемую позицию с тем, что реально стало
+                // офсетом ScrollArea в этом кадре — не важно, мы ли его толкнули (режим
+                // клавиатуры) или юзер сам покрутил колесом/потаскал мышью (режим мыши,
+                // тогда мы .vertical_scroll_offset() вообще не передаём, см. ниже) —
+                // иначе при следующем переключении на клавиатуру экспоненциальный доезд
+                // стартовал бы от устаревшей позиции и дёрнул бы список.
+                self.project_scroll_offset = area_resp.inner.inner.state.offset.y;
 
                 if start_adding {
                     self.project_adding        = true;
