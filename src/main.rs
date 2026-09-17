@@ -271,6 +271,7 @@ struct App {
     project_keyboard_focus:    Option<usize>,
     project_focus_is_keyboard: bool,
     project_focus_bias:        f32,
+    project_focus_bias_target: f32,
     project_scroll_offset:     f32,
     project_dropdown_h:    f32,
     project_adding:        bool,
@@ -438,6 +439,7 @@ impl App {
             project_keyboard_focus:    None,
             project_focus_is_keyboard: false,
             project_focus_bias:        0.5,
+            project_focus_bias_target: 0.5,
             project_scroll_offset:     0.0,
             project_dropdown_h:    0.0,
             project_adding:        false,
@@ -981,6 +983,7 @@ impl eframe::App for App {
                 if self.project_open {
                     self.project_keyboard_focus = None;
                     self.project_focus_bias     = 0.5;
+                    self.project_focus_bias_target = 0.5;
                 } else {
                     self.project_adding = false;
                     self.project_buf.clear();
@@ -1073,12 +1076,12 @@ impl eframe::App for App {
                         (Some(i), true)  => (i + 1) % n,
                         (Some(i), false) => (i + n - 1) % n,
                     });
-                    // Не резкий переброс 0.3<->0.7 при развороте направления — плавно
-                    // подтягиваем текущий bias к нужному полюсу; при устойчивом листании
-                    // в одну сторону за пару нажатий сам сойдётся к полюсу, а при развороте
-                    // на одно нажатие лишь слегка отступит, а не прыгнет на другой край.
-                    let target = if arrow_down { 0.7 } else { 0.3 };
-                    self.project_focus_bias += (target - self.project_focus_bias) * 0.6;
+                    // bias теперь тоже плавно ползёт к цели (см. ниже, вместе с offset,
+                    // одной и той же экспонентой), а не прыгает скачком по нажатию —
+                    // иначе при развороте направления target для offset сразу дёргался
+                    // в сторону СТАРОГО полюса (из-за резкого скачка bias) перед тем,
+                    // как поехать в новый — отсюда и рывок "в другую сторону" при развороте.
+                    self.project_focus_bias_target = if arrow_down { 0.8 } else { 0.2 };
                 }
 
                 // Enter подтверждает именно клавиатурный фокус (не то, что параллельно
@@ -1108,6 +1111,16 @@ impl eframe::App for App {
 
                 if self.project_focus_is_keyboard {
                     if let Some(idx) = self.project_keyboard_focus {
+                        let dt = ctx.input(|i| i.stable_dt);
+                        let t  = 1.0 - (1.0 - EXP_REACH).powf(dt / EXP_TIME);
+
+                        let bias_remaining = self.project_focus_bias_target - self.project_focus_bias;
+                        if bias_remaining.abs() < 0.001 {
+                            self.project_focus_bias = self.project_focus_bias_target;
+                        } else {
+                            self.project_focus_bias += t * bias_remaining;
+                        }
+
                         let row_center = idx as f32 * (ROW_H + 1.0) + ROW_H / 2.0;
                         let target = (row_center - self.project_focus_bias * available_h)
                             .clamp(0.0, max_scroll);
@@ -1115,13 +1128,13 @@ impl eframe::App for App {
                         if remaining.abs() < 1.0 {
                             self.project_scroll_offset = target;
                         } else {
-                            let dt = ctx.input(|i| i.stable_dt);
-                            let t  = 1.0 - (1.0 - EXP_REACH).powf(dt / EXP_TIME);
                             self.project_scroll_offset += t * remaining;
-                            // Без этого кадры между "доездами" случаются только когда
-                            // перерисовку попросит что-то ДРУГОЕ (в приложении дефолтный
-                            // пульс — раз в секунду, см. request_repaint_after ниже по
-                            // файлу) — анимация двигалась рывками вместо плавных ~60 fps.
+                        }
+                        // Без этого кадры между "доездами" случаются только когда
+                        // перерисовку попросит что-то ДРУГОЕ (в приложении дефолтный
+                        // пульс — раз в секунду, см. request_repaint_after ниже по
+                        // файлу) — анимация двигалась рывками вместо плавных ~60 fps.
+                        if bias_remaining.abs() >= 0.001 || remaining.abs() >= 1.0 {
                             ctx.request_repaint();
                         }
                     }
