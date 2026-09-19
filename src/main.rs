@@ -834,7 +834,7 @@ impl eframe::App for App {
                         let mut iter = tasks.into_iter();
                         if self.projects[idx].main.is_empty() {
                             let first   = iter.next().unwrap();
-                            let task_id = project::gen_id();
+                            let task_id = project::gen_task_id(&self.projects[idx].id);
                             let ts      = project::current_time();
                             let _       = self.sync.record_op(sync::oplog::OpKind::AddTask {
                                 project_id: self.projects[idx].id.clone(),
@@ -852,7 +852,7 @@ impl eframe::App for App {
                             );
                         }
                         for text in iter {
-                            let task_id = project::gen_id();
+                            let task_id = project::gen_task_id(&self.projects[idx].id);
                             let target  = add_target_for(&s, false);
                             let _       = self.sync.record_op(sync::oplog::OpKind::AddTask {
                                 project_id: self.projects[idx].id.clone(),
@@ -2231,7 +2231,7 @@ impl eframe::App for App {
                         let text    = mem::take(&mut self.buf);
                         let s       = self.settings.clone();
                         let idx     = self.active_project_idx;
-                        let task_id = project::gen_id();
+                        let task_id = project::gen_task_id(&self.projects[idx].id);
                         let target  = add_target_for(&s, self.projects[idx].main.is_empty());
                         let _       = self.sync.record_op(sync::oplog::OpKind::AddTask {
                             project_id: self.projects[idx].id.clone(),
