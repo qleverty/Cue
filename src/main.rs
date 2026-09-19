@@ -272,6 +272,8 @@ struct App {
     project_focus_is_keyboard: bool,
     project_focus_bias:        f32,
     project_focus_bias_target: f32,
+    project_focus_streak:      u32,
+    project_focus_last_dir:    Option<bool>,
     project_scroll_offset:     f32,
     project_dropdown_h:    f32,
     project_adding:        bool,
@@ -440,6 +442,8 @@ impl App {
             project_focus_is_keyboard: false,
             project_focus_bias:        0.5,
             project_focus_bias_target: 0.5,
+            project_focus_streak:      0,
+            project_focus_last_dir:    None,
             project_scroll_offset:     0.0,
             project_dropdown_h:    0.0,
             project_adding:        false,
@@ -984,6 +988,8 @@ impl eframe::App for App {
                     self.project_keyboard_focus = None;
                     self.project_focus_bias     = 0.5;
                     self.project_focus_bias_target = 0.5;
+                    self.project_focus_streak      = 0;
+                    self.project_focus_last_dir    = None;
                 } else {
                     self.project_adding = false;
                     self.project_buf.clear();
@@ -1077,11 +1083,24 @@ impl eframe::App for App {
                         (Some(i), false) => (i + n - 1) % n,
                     });
                     // bias теперь тоже плавно ползёт к цели (см. ниже, вместе с offset,
-                    // одной и той же экспонентой), а не прыгает скачком по нажатию —
-                    // иначе при развороте направления target для offset сразу дёргался
-                    // в сторону СТАРОГО полюса (из-за резкого скачка bias) перед тем,
-                    // как поехать в новый — отсюда и рывок "в другую сторону" при развороте.
-                    self.project_focus_bias_target = if arrow_down { 0.8 } else { 0.2 };
+                    // одной и той же экспонентой) — но САМА цель раньше прыгала сразу в
+                    // полный полюс (0.2/0.8) с первого же нажатия, из-за чего область
+                    // обзора почти сразу срывалась с места целиком, а не "докатывалась"
+                    // постепенно за несколько нажатий подряд. Теперь цель растёт по
+                    // счётчику подряд идущих нажатий В ОДНУ СТОРОНУ — при развороте
+                    // счётчик сбрасывается на 1 (не на 0 — это тоже нажатие), и полюс
+                    // набирается полностью только к FOCUS_STREAK_MAX-му нажатию подряд.
+                    const FOCUS_STREAK_MAX: u32 = 5;
+                    self.project_focus_streak = if self.project_focus_last_dir == Some(arrow_down) {
+                        (self.project_focus_streak + 1).min(FOCUS_STREAK_MAX)
+                    } else {
+                        1
+                    };
+                    self.project_focus_last_dir = Some(arrow_down);
+
+                    let pole = if arrow_down { 0.8 } else { 0.2 };
+                    let frac = self.project_focus_streak as f32 / FOCUS_STREAK_MAX as f32;
+                    self.project_focus_bias_target = 0.5 + (pole - 0.5) * frac;
                 }
 
                 // Enter подтверждает именно клавиатурный фокус (не то, что параллельно
