@@ -144,7 +144,15 @@ fn pull_all(
                 }
 
                 let ops: Vec<Op> = body.lines()
-                    .filter_map(|l| serde_json::from_str(l).ok())
+                    .filter_map(|l| match serde_json::from_str::<Op>(l) {
+                        Ok(op) => Some(op),
+                        Err(e) => {
+                            // ВРЕМЕННЫЙ дебаг — .ok() выше молча ел ошибку,
+                            // из-за чего "got 0 ops" ничего не объясняло.
+                            crate::clog!("[engine] PARSE FAIL: {e} | line={l}");
+                            None
+                        }
+                    })
                     .collect();
                 crate::clog!("[engine] got {} ops from {}", ops.len(), peer.device_id);
                 if ops.is_empty() { continue; }

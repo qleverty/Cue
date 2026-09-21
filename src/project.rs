@@ -126,6 +126,14 @@ pub struct TaskData {
     /// drop локальный, без опа), появится в v2.1.
     #[serde(default)]
     pub pos_edited_at:     u64,
+    /// Время последнего переноса задачи между проектами (TransferTask,
+    /// v2.1) — защищает от гонки "два устройства решили увезти в разные
+    /// места одновременно": выигрывает перенос с более поздним ts. Здесь
+    /// не в оплоге, а прямо на задаче — переезжает вместе с ней, где бы
+    /// она сейчас ни лежала. Приёмная сторона в v2 заранее, как и с
+    /// pos_edited_at выше — отправки самого TransferTask ещё нет.
+    #[serde(default)]
+    pub transferred_at:    u64,
 }
 
 /// Эффективно активна ли задача (для сортировки/выбора следующей main).
@@ -403,6 +411,7 @@ impl LoadedProject {
         let mut task = TaskData {
             text, routine: None, created_at: current_time(), order_key: 0.0,
             text_edited_at: current_time(), routine_edited_at: 0, pos_edited_at: 0,
+            transferred_at: 0,
         };
 
         if self.main.is_empty() {

@@ -8,24 +8,38 @@ use crate::{
     },
 };
 
+/// Индекс проекта, где сейчас реально лежит task_id — сначала пробуем
+/// hint_id (адрес на момент отправки опа), если не нашли там — ищем по
+/// всем загруженным проектам: задача могла уехать (TransferTask) уже
+/// куда-то ещё, пока этот оп летел по сети. project_id в опе после этого
+/// — просто подсказка-маршрутизация, не авторитетный адрес.
+pub(crate) fn find_task_project(projects: &[LoadedProject], hint_id: &str, task_id: &str) -> Option<usize> {
+    if let Some(i) = projects.iter().position(|p| p.id == hint_id) {
+        if projects[i].main.contains_key(task_id) || projects[i].subs.contains_key(task_id) {
+            return Some(i);
+        }
+    }
+    projects.iter().position(|p| p.main.contains_key(task_id) || p.subs.contains_key(task_id))
+}
+
 /// Apply one op to the full mutable state.
-/// Returns `Some(project_id)` if a project was modified and needs saving.
-/// Returns `None` if the op was skipped (dedup / tombstoned) or no project was touched.
+/// Returns project_id'ы, которые были задеты и нуждаются в сохранении на
+/// диск — обычно один, но TransferTask трогает сразу два (откуда и куда).
 pub fn apply_op(
     op:         &Op,
     projects:   &mut Vec<LoadedProject>,
     tombstones: &mut Tombstones,
     settings:   &mut Settings,
     seen:       &mut HashSet<String>,
-) -> Option<String> {
-    if !seen.insert(op.op_id.clone()) { return None; }
+) -> Vec<String> {
+    if !seen.insert(op.op_id.clone()) { return Vec::new(); }
 
     match &op.kind {
         // ── projects ─────────────────────────────────────────────────────
         OpKind::CreateProject { project_id, name, color, created_at } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            if projects.iter().any(|p| &p.id == project_id) { return None; }
-            let c = hex_to_color32(color)?;
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            if projects.iter().any(|p| &p.id == project_id) { return Vec::new(); }
+            let Some(c) = hex_to_color32(color) else { return Vec::new(); };
             let mut p   = LoadedProject::new(project_id.clone(), name.clone(), c, *created_at);
             p.color_hex = color.clone();
             // "В конец" — единственный вариант размещения нового проекта в
@@ -34,55 +48,56 @@ pub fn apply_op(
             // независимо, тем же приёмом, что и next_end_key() у задач.
             p.order_key = projects.iter().map(|p| p.order_key).fold(0.0, f64::max) + 1000.0;
             projects.push(p);
-            Some(project_id.clone())
+            vec![project_id.clone()]
         }
         OpKind::DeleteProject { project_id } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
             tombstones.add_project(project_id, op.ts, &op.device_id);
             if let Some(i) = projects.iter().position(|p| &p.id == project_id) {
                 projects[i].delete_file();
                 projects.remove(i);
             }
-            None // project gone, nothing to save
+            Vec::new() // project gone, nothing to save
         }
         OpKind::RenameProject { project_id, name } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            let p = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if op.ts <= p.name_edited_at { return None; }
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            let Some(p) = projects.iter_mut().find(|p| &p.id == project_id) else { return Vec::new(); };
+            if op.ts <= p.name_edited_at { return Vec::new(); }
             p.name = name.clone();
             p.name_edited_at = op.ts;
-            Some(project_id.clone())
+            vec![project_id.clone()]
         }
         OpKind::RecolorProject { project_id, color } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            let p = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if op.ts <= p.color_edited_at { return None; }
-            let c = hex_to_color32(color)?;
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            let Some(p) = projects.iter_mut().find(|p| &p.id == project_id) else { return Vec::new(); };
+            if op.ts <= p.color_edited_at { return Vec::new(); }
+            let Some(c) = hex_to_color32(color) else { return Vec::new(); };
             p.color     = c;
             p.color_hex = color.clone();
             p.color_edited_at = op.ts;
-            Some(project_id.clone())
+            vec![project_id.clone()]
         }
         OpKind::MoveProject { project_id, order_key } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            let p = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if op.ts <= p.order_key_edited_at { return None; }
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            let Some(p) = projects.iter_mut().find(|p| &p.id == project_id) else { return Vec::new(); };
+            if op.ts <= p.order_key_edited_at { return Vec::new(); }
             p.order_key = *order_key;
             p.order_key_edited_at = op.ts;
-            Some(project_id.clone())
+            vec![project_id.clone()]
         }
 
         // ── tasks ─────────────────────────────────────────────────────────
         OpKind::AddTask { project_id, task_id, text, target } => {
             if tombstones.deleted_at(project_id)
-                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
+                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return Vec::new(); }
+            let Some(proj) = projects.iter_mut().find(|p| &p.id == project_id) else { return Vec::new(); };
             if proj.main.contains_key(task_id.as_str())
-                || proj.subs.contains_key(task_id.as_str()) { return None; }
+                || proj.subs.contains_key(task_id.as_str()) { return Vec::new(); }
             let task = TaskData {
                 text: text.clone(), routine: None,
                 created_at: op.ts, order_key: 0.0,
                 text_edited_at: op.ts, routine_edited_at: 0, pos_edited_at: 0,
+                transferred_at: 0,
             };
             match target {
                 AddTarget::Main => {
@@ -97,52 +112,132 @@ pub fn apply_op(
                     proj.subs.shift_insert(0, task_id.clone(), t);
                 }
             }
-            Some(project_id.clone())
+            vec![project_id.clone()]
         }
         OpKind::DeleteTask { project_id, task_id } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
             tombstones.add_task(task_id, project_id, op.ts, &op.device_id);
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            proj.subs.shift_remove(task_id.as_str());
-            proj.main.shift_remove(task_id.as_str());
-            Some(project_id.clone())
+            // По task_id, не строго по project_id — задача могла уехать
+            // (TransferTask) в другой проект до того, как это удаление
+            // сюда долетело; project_id тут просто подсказка-адрес.
+            let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
+            let real_id = projects[idx].id.clone();
+            projects[idx].subs.shift_remove(task_id.as_str());
+            projects[idx].main.shift_remove(task_id.as_str());
+            vec![real_id]
         }
         OpKind::CompleteTask { project_id, task_id } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
+            let real_id = projects[idx].id.clone();
             // op.ts используется и для проверки исчерпания direct-дат, и
             // для main_edited_at — на входящем опе оба совпадают, точного
             // локального времени исходного устройства для пересчёта дат
             // всё равно нет (намеренное упрощение, см. project.rs).
-            if !proj.complete_task(task_id, op.ts, op.ts) { return None; }
-            Some(project_id.clone())
+            if !projects[idx].complete_task(task_id, op.ts, op.ts) { return Vec::new(); }
+            vec![real_id]
         }
         OpKind::SetRoutine { project_id, task_id, routine } => {
             if tombstones.deleted_at(project_id)
-                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if !proj.apply_set_routine(task_id, routine.clone(), op.ts) { return None; }
-            Some(project_id.clone())
+                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return Vec::new(); }
+            let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
+            let real_id = projects[idx].id.clone();
+            if !projects[idx].apply_set_routine(task_id, routine.clone(), op.ts) { return Vec::new(); }
+            vec![real_id]
         }
         OpKind::PromoteTask { project_id, task_id } => {
-            if tombstones.deleted_at(project_id).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if !proj.apply_promote_task(task_id, op.ts) { return None; }
-            Some(project_id.clone())
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
+            let real_id = projects[idx].id.clone();
+            if !projects[idx].apply_promote_task(task_id, op.ts) { return Vec::new(); }
+            vec![real_id]
         }
         OpKind::EditTask { project_id, task_id, text } => {
             if tombstones.deleted_at(project_id)
-                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if !proj.apply_edit_task(task_id, text, op.ts) { return None; }
-            Some(project_id.clone())
+                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return Vec::new(); }
+            let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
+            let real_id = projects[idx].id.clone();
+            if !projects[idx].apply_edit_task(task_id, text, op.ts) { return Vec::new(); }
+            vec![real_id]
         }
         OpKind::MoveTask { project_id, task_id, order_key } => {
             if tombstones.deleted_at(project_id)
-                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return None; }
-            let proj = projects.iter_mut().find(|p| &p.id == project_id)?;
-            if !proj.apply_move_task(task_id, *order_key, op.ts) { return None; }
-            Some(project_id.clone())
+                .or_else(|| tombstones.deleted_at(task_id)).is_some() { return Vec::new(); }
+            let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
+            let real_id = projects[idx].id.clone();
+            if !projects[idx].apply_move_task(task_id, *order_key, op.ts) { return Vec::new(); }
+            vec![real_id]
+        }
+        OpKind::TransferTask {
+            task_id, from_project_id, to_project_id, target,
+            text, text_edited_at, routine, routine_edited_at,
+            order_key, pos_edited_at, created_at,
+        } => {
+            if tombstones.deleted_at(task_id).is_some() { return Vec::new(); }
+            if tombstones.deleted_at(to_project_id).is_some() { return Vec::new(); }
+
+            let existing = find_task_project(projects, from_project_id, task_id);
+
+            // Мёржим по каждому полю отдельно против того, что реально уже
+            // лежит на найденной копии (если нашлась) — TransferTask несёт
+            // снепшот, а не авторитетную перезапись: пока он летел, кто-то
+            // мог независимо отредактировать текст/рутину/позицию с более
+            // свежим штампом, и это не должно потеряться при переносе.
+            let (final_text, final_text_ts, final_routine, final_routine_ts,
+                 final_order_key, final_pos_ts, final_created_at, existing_transferred_at) =
+                if let Some(idx) = existing {
+                    let cur = projects[idx].main.get(task_id.as_str())
+                        .or_else(|| projects[idx].subs.get(task_id.as_str()));
+                    let Some(cur) = cur else { return Vec::new(); }; // не должно случиться — find_task_project уже подтвердил наличие
+                    (
+                        if *text_edited_at >= cur.text_edited_at { text.clone() } else { cur.text.clone() },
+                        (*text_edited_at).max(cur.text_edited_at),
+                        if *routine_edited_at >= cur.routine_edited_at { routine.clone() } else { cur.routine.clone() },
+                        (*routine_edited_at).max(cur.routine_edited_at),
+                        if *pos_edited_at >= cur.pos_edited_at { *order_key } else { cur.order_key },
+                        (*pos_edited_at).max(cur.pos_edited_at),
+                        cur.created_at.min(*created_at),
+                        cur.transferred_at,
+                    )
+                } else {
+                    (text.clone(), *text_edited_at, routine.clone(), *routine_edited_at,
+                     *order_key, *pos_edited_at, *created_at, 0)
+                };
+
+            // Гонка "куда едет" — не про поля, а про сам факт переноса:
+            // выигрывает перенос с более поздним ts, независимо от порядка
+            // доставки. Если задачу раньше никогда не переносили,
+            // existing_transferred_at=0, и любой перенос выигрывает.
+            if existing_transferred_at >= op.ts { return Vec::new(); }
+
+            let mut touched = Vec::new();
+            if let Some(idx) = existing {
+                let from_real_id = projects[idx].id.clone();
+                projects[idx].subs.shift_remove(task_id.as_str());
+                projects[idx].main.shift_remove(task_id.as_str());
+                touched.push(from_real_id);
+            }
+
+            let Some(dest) = projects.iter_mut().find(|p| &p.id == to_project_id) else { return touched; };
+            let new_task = TaskData {
+                text: final_text, routine: final_routine,
+                created_at: final_created_at, order_key: final_order_key,
+                text_edited_at: final_text_ts, routine_edited_at: final_routine_ts,
+                pos_edited_at: final_pos_ts, transferred_at: op.ts,
+            };
+            match target {
+                AddTarget::Main => { dest.apply_add_to_main(task_id.clone(), new_task, op.ts); }
+                AddTarget::End | AddTarget::Beginning => {
+                    // order_key уже явно задан в снепшоте (пережил мёрж выше) —
+                    // в отличие от AddTask, тут не пересчитываем через
+                    // next_end_key()/next_beg_key() заново: у AddTask
+                    // End/Beginning — просто чуть более грубая версия того
+                    // же самого, а тут уже есть точное значение, ему и верим.
+                    dest.subs.insert(task_id.clone(), new_task);
+                }
+            }
+            touched.push(to_project_id.clone());
+            touched
         }
 
         // ── settings ─────────────────────────────────────────────────────
@@ -158,7 +253,7 @@ pub fn apply_op(
                 _ => {}
             }
             if applied { settings.save(); }
-            None
+            Vec::new()
         }
     }
 }

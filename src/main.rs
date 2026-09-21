@@ -12,6 +12,7 @@ pub mod icon_cache;
 pub mod exclusive_bind;
 pub mod sync;
 pub mod ui;
+pub mod updater;
 
 // ── File logger (GUI app has no console on Windows) ──────────────────────────
 
@@ -296,6 +297,8 @@ struct App {
     /// воскресил их обратно. Наполняется только пока project_loader_rx —
     /// Some; очищается сразу после успешного мёржа батча (окно закрылось).
     deleted_during_load:    std::collections::HashSet<String>,
+    pending_ops:            Vec<sync::oplog::Op>,
+    updater_spawned:        bool,
     /// real_i (индекс в subs) задачи, которая сейчас редактируется инлайн
     /// (карандаш). None — никто не редактируется. Пока Some — весь список
     /// subs залочен для остальных кнопок (крестик/routine/карандаш).
@@ -411,6 +414,7 @@ impl App {
                     let all = project::load_all_projects();
                     let _   = project_batch_tx.send(all);
                 }
+                updater::check_and_stage_update();
             })
             .expect("spawn routine thread");
 
@@ -454,6 +458,8 @@ impl App {
             last_lock_refresh:     0, // 0 → первое обновление лока в update() сработает сразу
             project_loader_rx,
             deleted_during_load:   std::collections::HashSet::new(),
+            pending_ops:           Vec::new(),
+            updater_spawned:       false,
             editing_task:          None,
             edit_buf:              String::new(),
             edit_need_focus:       false,
@@ -637,6 +643,26 @@ impl eframe::App for App {
             // the engine thread has typically done this long before the user
             // gets around to closing the window.
             self.sync.flush_oplog_before_exit();
+
+            if !self.updater_spawned {
+                self.updater_spawned = true;
+                if let Ok(exe) = std::env::current_exe() {
+                    let mut upd = exe.as_os_str().to_owned();
+                    upd.push(".cueextraupd");
+                    let upd_path = std::path::PathBuf::from(upd);
+                    if upd_path.exists() {
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::process::CommandExt;
+                            const CREATE_NO_WINDOW: u32 = 0x08000000;
+                            let _ = std::process::Command::new(app_dir().join("cue-updater.exe"))
+                                .arg(&upd_path)
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .spawn();
+                        }
+                    }
+                }
+            }
         }
 
         // ── merge in historical op_ids once the background oplog load
@@ -691,12 +717,31 @@ impl eframe::App for App {
                         }
                     }
 
-                    if let Some(pid) = sync::apply::apply_op(
+                    // Пер-таск опы теперь не считают project_id() авторитетным
+                    // адресом — задача могла уехать (TransferTask) в другой
+                    // проект. Если не нашлась ни по подсказке (уже догруженной
+                    // выше, если та была заглушкой), ни вообще нигде среди
+                    // self.projects — но где-то ещё остались недогруженные
+                    // заглушки, нельзя быть уверенным, что она не прячется
+                    // именно там. Откладываем оп до прихода полного батча
+                    // (см. ниже, "drain project-loader batch"), а не считаем
+                    // задачу удалённой раньше времени.
+                    if let Some(tid) = op.kind.task_id() {
+                        let hint  = op.kind.project_id().unwrap_or("");
+                        let found = sync::apply::find_task_project(&self.projects, hint, tid).is_some();
+                        let any_stub_remains = self.projects.iter().any(|p| !p.loaded);
+                        if !found && any_stub_remains {
+                            self.pending_ops.push(op.clone());
+                            continue;
+                        }
+                    }
+
+                    dirty.extend(sync::apply::apply_op(
                         &op, &mut self.projects,
                         &mut self.sync.tombstones,
                         &mut self.settings,
                         &mut self.sync.seen_ops,
-                    ) { dirty.insert(pid); }
+                    ));
                 }
             }
             for pid in &dirty {
@@ -768,6 +813,29 @@ impl eframe::App for App {
                     // нужен: project_loader_rx уже None (взяли через .take()
                     // выше), новых батчей не будет, воскрешать больше нечему.
                     self.deleted_during_load.clear();
+                    // Пока были незагруженные заглушки, часть входящих опов
+                    // (пер-таск, не нашедшихся по прямому адресу) откладывалась
+                    // сюда — теперь, когда весь батч на месте и заглушек больше
+                    // не останется (загрузчик шлёт ровно один батч), можно
+                    // безопасно разобрать очередь: либо найдём задачу теперь
+                    // (переехала), либо она правда удалена — и то, и то честно.
+                    if !self.pending_ops.is_empty() {
+                        let mut dirty: std::collections::HashSet<String> =
+                            std::collections::HashSet::new();
+                        for op in mem::take(&mut self.pending_ops) {
+                            dirty.extend(sync::apply::apply_op(
+                                &op, &mut self.projects,
+                                &mut self.sync.tombstones,
+                                &mut self.settings,
+                                &mut self.sync.seen_ops,
+                            ));
+                        }
+                        for pid in &dirty {
+                            if let Some(p) = self.projects.iter_mut().find(|p| p.id == *pid) {
+                                p.save();
+                            }
+                        }
+                    }
                     // Перестроить манифест из self.projects БЕЗУСЛОВНО, один
                     // раз (это разовое, не per-frame событие — сам приход
                     // батча случается ровно один раз за запуск). Закрывает
@@ -847,6 +915,7 @@ impl eframe::App for App {
                                 project::TaskData {
                                     text: first, routine: None, created_at: ts, order_key: 0.0,
                                     text_edited_at: ts, routine_edited_at: 0, pos_edited_at: 0,
+                                    transferred_at: 0,
                                 },
                                 ts,
                             );
@@ -2352,6 +2421,11 @@ fn main() -> eframe::Result<()> {
         }
     }
     write_lock();
+
+    let updater_path = app_dir().join("cue-updater.exe");
+    if !updater_path.exists() {
+        let _ = std::fs::write(&updater_path, include_bytes!("../cue-updater.exe"));
+    }
 
     let settings = settings::Settings::load();
     let initial_w = settings.last_width.unwrap_or(W);

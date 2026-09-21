@@ -52,6 +52,32 @@ pub enum OpKind {
     /// рутину целиком (задача остаётся обычной). Без диффов.
     #[serde(rename = "SET_ROUTINE")]
     SetRoutine     { project_id: String, task_id: String, routine: Option<crate::project::Routine> },
+    /// Перенос задачи между проектами (v2.1 — авто-подхват рутин из других
+    /// проектов, ручной drag & drop между списками). В v2 никогда не
+    /// отправляется, но должен приниматься уже сейчас — по тому же
+    /// принципу, что и MoveProject выше. task_id — стабильная идентичность
+    /// задачи через границу проектов (не пересоздаётся). from_project_id —
+    /// только подсказка-адрес для маршрутизации на приёме: истинное текущее
+    /// место задачи ищется по task_id, если подсказка промахнулась (задача
+    /// могла уехать ещё куда-то, пока этот оп летел). Поля text/routine/
+    /// order_key несут ПОЛНЫЙ снепшот со своими же LWW-штампами, как у
+    /// EditTask/SetRoutine/MoveTask — при приёме сравниваются с тем, что
+    /// реально лежит на найденной копии (если нашлась), а не затирают
+    /// её вслепую. Сам перенос защищён отдельно — TaskData::transferred_at.
+    #[serde(rename = "TRANSFER_TASK")]
+    TransferTask   {
+        task_id:           String,
+        from_project_id:   String,
+        to_project_id:     String,
+        target:            AddTarget,
+        text:              String,
+        text_edited_at:    u64,
+        routine:           Option<crate::project::Routine>,
+        routine_edited_at: u64,
+        order_key:         f64,
+        pos_edited_at:     u64,
+        created_at:        u64,
+    },
     #[serde(rename = "SET_SHARED_SETTING")]
     SetSharedSetting { key: String, value: serde_json::Value },
 }
@@ -77,7 +103,29 @@ impl OpKind {
             OpKind::EditTask       { project_id, .. } => Some(project_id),
             OpKind::MoveTask       { project_id, .. } => Some(project_id),
             OpKind::SetRoutine     { project_id, .. } => Some(project_id),
+            OpKind::TransferTask   { from_project_id, .. } => Some(from_project_id),
             OpKind::SetSharedSetting { .. }           => None,
+        }
+    }
+
+    /// task_id этого опа, если он вообще про конкретную задачу (а не про
+    /// проект целиком или настройку). None у AddTask намеренно — она не
+    /// ищет существующую задачу, а создаёт новую, ей нечего искать по
+    /// всем проектам. Используется в main.rs перед apply_op: если задача
+    /// не нашлась по подсказке project_id() и среди self.projects ещё
+    /// остались незагруженные заглушки — оп нужно отложить в очередь, а
+    /// не считать задачу удалённой раньше времени (см. обсуждение
+    /// TransferTask и общего поиска по всем проектам).
+    pub fn task_id(&self) -> Option<&str> {
+        match self {
+            OpKind::DeleteTask     { task_id, .. } => Some(task_id),
+            OpKind::CompleteTask   { task_id, .. } => Some(task_id),
+            OpKind::PromoteTask    { task_id, .. } => Some(task_id),
+            OpKind::EditTask       { task_id, .. } => Some(task_id),
+            OpKind::MoveTask       { task_id, .. } => Some(task_id),
+            OpKind::SetRoutine     { task_id, .. } => Some(task_id),
+            OpKind::TransferTask   { task_id, .. } => Some(task_id),
+            _ => None,
         }
     }
 }
@@ -144,6 +192,7 @@ impl OpLog {
             OpKind::EditTask       { .. } => "EDIT_TASK",
             OpKind::MoveTask       { .. } => "MOVE_TASK",
             OpKind::SetRoutine     { .. } => "SET_ROUTINE",
+            OpKind::TransferTask   { .. } => "TRANSFER_TASK",
             OpKind::SetSharedSetting{..}  => "SET_SHARED_SETTING",
         };
         crate::clog!("[oplog] append seq={} op={op_name} path={:?}", self.next_seq, self.path);
