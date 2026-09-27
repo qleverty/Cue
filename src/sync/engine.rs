@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use super::{cursors::Cursors, oplog::Op, server::SharedState};
+use super::{cursors::Cursors, oplog::Op, server::{SharedState, PROTO_VER}};
 
 const SYNC_INTERVAL:   Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT:    Duration = Duration::from_secs(10);
@@ -94,48 +94,113 @@ fn pull_all(
             crate::clog!("[engine] skipping {} — no ip_hint", peer.device_id);
             continue;
         };
-        let since = cursors.lock().unwrap().get(&peer.device_id);
-        let url   = format!("http://{ip}:{}/1/ops?since={since}&token={}", state.http_port, peer.token);
-        crate::clog!("[engine] pulling from {} url={}", peer.device_id, url);
-
         let now_ts = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
+        // ── шаг 1: /hello — ВСЕГДА первым, безусловно. Это корень доверия:
+        // до него мы не знаем, можно ли вообще понимать ответ этого пира на
+        // /1/ops, так что сам /hello не версионирован в пути (см. server.rs).
+        let hello_url = format!("http://{ip}:{}/hello", state.http_port);
+
+        #[derive(serde::Deserialize)]
+        struct Hello {
+            #[serde(default)]
+            proto_ver:   u32,
+            #[serde(default)]
+            proto_vers:  Vec<u32>,
+            device_name: String,
+            #[serde(default)]
+            device_type: super::DeviceType,
+        }
+
+        let hello = match http_get(&hello_url, HTTP_TIMEOUT) {
+            Ok(body) => match serde_json::from_str::<Hello>(&body) {
+                Ok(h)  => h,
+                Err(e) => {
+                    // 200, но тело не в нашем формате — не "обрыв связи", а
+                    // именно незнакомый/несовместимый пир. Не трогаем /ops.
+                    crate::clog!("[engine] /hello UNPARSEABLE from {} ({}): {e}", peer.device_id, ip);
+                    state.sync_status.lock().unwrap().peer_statuses.insert(
+                        peer.device_id.clone(),
+                        super::PeerStatus { online: false, error: false, revoked: false, incompatible: true },
+                    );
+                    continue;
+                }
+            },
+            Err(PullError::Revoked) => {
+                crate::clog!("[engine] REVOKED by {} ({})", peer.device_id, ip);
+                state.sync_status.lock().unwrap().peer_statuses.insert(
+                    peer.device_id.clone(),
+                    super::PeerStatus { online: false, error: false, revoked: true, incompatible: false },
+                );
+                continue;
+            }
+            Err(PullError::Unavailable) => {
+                crate::clog!("[engine] /hello FAILED from {} ({})", peer.device_id, ip);
+                state.sync_status.lock().unwrap().peer_statuses.insert(
+                    peer.device_id.clone(),
+                    super::PeerStatus { online: false, error: true, revoked: false, incompatible: false },
+                );
+                continue;
+            }
+        };
+
+        // ── шаг 2: проверка совместимости. Направление проверки важно — не
+        // "пересечение списков", а "я нахожу СЕБЯ у пира": единственное, что
+        // имеет значение — пойму ли я формат, который пир мне отдаст на
+        // /1/ops. Своего списка версий не нужно, достаточно одной константы.
+        let peer_understands = hello.proto_ver == PROTO_VER
+            || hello.proto_vers.contains(&PROTO_VER);
+
+        if !peer_understands {
+            crate::clog!(
+                "[engine] INCOMPATIBLE {} ({}) — proto_ver={} proto_vers={:?}, we need {}",
+                peer.device_id, ip, hello.proto_ver, hello.proto_vers, PROTO_VER
+            );
+            state.sync_status.lock().unwrap().peer_statuses.insert(
+                peer.device_id.clone(),
+                super::PeerStatus { online: false, error: false, revoked: false, incompatible: true },
+            );
+            continue;
+        }
+
+        // Совместимы — обновляем имя/тип пира сразу по факту успешного
+        // /hello, независимо от того, что вернёт /ops дальше (пустой ответ,
+        // 0 новых опов и т.п. больше не мешают освежить это).
+        {
+            let mut peers = state.peers.write().unwrap();
+            let changed = peers.list_mut()
+                .find(|p| p.device_id == peer.device_id)
+                .map(|p| {
+                    let mut changed = false;
+                    if p.device_name != hello.device_name {
+                        p.device_name = hello.device_name.clone();
+                        changed = true;
+                    }
+                    if p.device_type != hello.device_type {
+                        p.device_type = hello.device_type;
+                        changed = true;
+                    }
+                    changed
+                })
+                .unwrap_or(false);
+            if changed { peers.save(); }
+        }
+
+        // ── шаг 3: /ops — только теперь, только если /hello подтвердил, что
+        // мы понимаем формат этого пира.
+        let since = cursors.lock().unwrap().get(&peer.device_id);
+        let url   = format!("http://{ip}:{}/1/ops?since={since}&token={}", state.http_port, peer.token);
+        crate::clog!("[engine] pulling from {} url={}", peer.device_id, url);
+
         match http_get(&url, HTTP_TIMEOUT) {
             Ok(body) => {
-                // Successful connection — update last_synced_at, name, ip and mark online.
-                {
-                    let hello_url = format!("http://{ip}:{}/1/hello", state.http_port);
-                    if let Ok(body) = http_get(&hello_url, HTTP_TIMEOUT) {
-                        #[derive(serde::Deserialize)]
-                        struct Hello { device_name: String, #[serde(default)] device_type: super::DeviceType }
-                        if let Ok(h) = serde_json::from_str::<Hello>(&body) {
-                            let mut peers = state.peers.write().unwrap();
-                            let changed = peers.list_mut()
-                                .find(|p| p.device_id == peer.device_id)
-                                .map(|p| {
-                                    let mut changed = false;
-                                    if p.device_name != h.device_name {
-                                        p.device_name = h.device_name;
-                                        changed = true;
-                                    }
-                                    if p.device_type != h.device_type {
-                                        p.device_type = h.device_type;
-                                        changed = true;
-                                    }
-                                    changed
-                                })
-                                .unwrap_or(false);
-                            if changed { peers.save(); }
-                        }
-                    }
-                }
                 state.peers.write().unwrap().update_last_synced(&peer.device_id, now_ts);
                 state.sync_status.lock().unwrap().peer_statuses.insert(
                     peer.device_id.clone(),
-                    super::PeerStatus { online: true, error: false, revoked: false },
+                    super::PeerStatus { online: true, error: false, revoked: false, incompatible: false },
                 );
 
                 if body.trim().is_empty() {
@@ -172,14 +237,14 @@ fn pull_all(
                 crate::clog!("[engine] REVOKED by {} ({})", peer.device_id, ip);
                 state.sync_status.lock().unwrap().peer_statuses.insert(
                     peer.device_id.clone(),
-                    super::PeerStatus { online: false, error: false, revoked: true },
+                    super::PeerStatus { online: false, error: false, revoked: true, incompatible: false },
                 );
             }
             Err(PullError::Unavailable) => {
                 crate::clog!("[engine] pull FAILED from {} ({})", peer.device_id, ip);
                 state.sync_status.lock().unwrap().peer_statuses.insert(
                     peer.device_id.clone(),
-                    super::PeerStatus { online: false, error: true, revoked: false },
+                    super::PeerStatus { online: false, error: true, revoked: false, incompatible: false },
                 );
             }
         }

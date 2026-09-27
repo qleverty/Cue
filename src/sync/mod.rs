@@ -99,6 +99,13 @@ pub struct PeerStatus {
     pub error:   bool,
     /// true when the peer returned 403 — they revoked our token.
     pub revoked: bool,
+    /// true when /hello answered but our protocol version (PROTO_VER) is
+    /// not among the peer's declared proto_ver/proto_vers — we deliberately
+    /// never called /ops on them this cycle. Distinct from `error`: we DID
+    /// reach them, we just know we can't understand their /ops format.
+    /// Re-checked every cycle (no permanent "blacklist") — if they ever
+    /// update to a mutually understood version, sync resumes on its own.
+    pub incompatible: bool,
 }
 
 #[derive(Default)]

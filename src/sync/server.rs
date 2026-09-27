@@ -135,7 +135,13 @@ fn handle(req: Request, state: &SharedState) {
     let params = parse_query(query);
 
     match (req.method(), path) {
-        (Method::Get,  "/1/hello")       => hello(req, state),
+        // /hello — единственный эндпоинт БЕЗ версионного префикса. Это корень
+        // доверия: чтобы вообще узнать версию протокола пира, нельзя заранее
+        // предполагать её в пути запроса. Форма ответа этой функции обязана
+        // оставаться стабильной для любой прошлой и будущей версии протокола —
+        // можно только добавлять опциональные поля, никогда не менять смысл
+        // существующих и не требовать новых обязательных.
+        (Method::Get,  "/hello")         => hello(req, state),
         (Method::Get,  "/1/ops")         => serve_ops(req, state, &params),
         (Method::Post, "/1/request_sync") => request_sync(req, state),
         (Method::Post, "/1/accept_sync")   => accept_sync(req, state),
@@ -148,9 +154,23 @@ fn handle(req: Request, state: &SharedState) {
 
 fn hello(req: Request, state: &SharedState) {
     #[derive(Serialize)]
-    struct Hello<'a> { proto_ver: u32, device_id: &'a str, device_name: String, device_type: DeviceType }
+    struct Hello<'a> {
+        proto_ver:   u32,
+        // Версии протокола, которые мы МОЖЕМ отдать по запросу, помимо
+        // основной `proto_ver` — задел на будущее (см. обсуждение v3
+        // с обратной совместимостью). Сегодня у нас только одна версия
+        // протокола вообще, так что список всегда пуст — но поле уже
+        // должно существовать в формате, потому что добавить его позже
+        // так, чтобы уже выпущенные v2-клиенты научились его учитывать,
+        // будет нельзя (см. раздел 1а общего обзора проекта).
+        proto_vers:  &'a [u32],
+        device_id:   &'a str,
+        device_name: String,
+        device_type: DeviceType,
+    }
     let body = serde_json::to_string(&Hello {
         proto_ver:   PROTO_VER,
+        proto_vers:  &[],
         device_id:   &state.device_id,
         device_name: state.device_name.read().unwrap().clone(),
         device_type: DeviceType::Desktop,

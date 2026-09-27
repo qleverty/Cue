@@ -342,6 +342,13 @@ fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
     if status.revoked {
         return (Color32::from_rgb(200, 45, 45), "Отвязано".to_owned());
     }
+    if status.incompatible {
+        // Мы реально достучались до пира (/hello ответил) — просто не
+        // понимаем формат его /ops. Отдельный от "Оффлайн"/"Отвязано" цвет
+        // и текст: причина не связь, а версия протокола. Перепроверяется
+        // каждый цикл сама — никакого "навсегда заблокирован" тут нет.
+        return (Color32::from_rgb(217, 119, 6), "Несовместимо".to_owned());
+    }
     if status.online {
         // "online, но ни разу не синхронизировались" физически недостижимо —
         // engine.rs выставляет online и last_synced_at всегда вместе — но
