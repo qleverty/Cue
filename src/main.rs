@@ -644,7 +644,7 @@ impl eframe::App for App {
             // gets around to closing the window.
             self.sync.flush_oplog_before_exit();
 
-            if !self.updater_spawned {
+            if !self.updater_spawned && !cfg!(debug_assertions) {
                 self.updater_spawned = true;
                 if let Ok(exe) = std::env::current_exe() {
                     let mut upd = exe.as_os_str().to_owned();

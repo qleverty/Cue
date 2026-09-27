@@ -24,35 +24,64 @@ fn split_url(url: &str) -> Option<(&str, &str)> {
 
 fn fetch_once(url: &str) -> Option<(u16, HashMap<String, String>, Vec<u8>)> {
     ensure_provider();
-    let (host, path) = split_url(url)?;
+    let Some((host, path)) = split_url(url) else {
+        crate::clog!("[updater] split_url failed for {url}");
+        return None;
+    };
 
     let root_store = rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder()
         .with_root_certificates(root_store)
         .with_no_client_auth();
-    let server_name = rustls::pki_types::ServerName::try_from(host.to_string()).ok()?;
-    let conn = rustls::ClientConnection::new(Arc::new(config), server_name).ok()?;
+    let Ok(server_name) = rustls::pki_types::ServerName::try_from(host.to_string()) else {
+        crate::clog!("[updater] bad server_name {host}");
+        return None;
+    };
+    let conn = match rustls::ClientConnection::new(Arc::new(config), server_name) {
+        Ok(c) => c,
+        Err(e) => { crate::clog!("[updater] ClientConnection::new failed: {e}"); return None; }
+    };
 
-    let sock = TcpStream::connect((host, 443)).ok()?;
-    sock.set_read_timeout(Some(TIMEOUT)).ok()?;
-    sock.set_write_timeout(Some(TIMEOUT)).ok()?;
+    let sock = match TcpStream::connect((host, 443)) {
+        Ok(s) => s,
+        Err(e) => { crate::clog!("[updater] TcpStream::connect({host}:443) failed: {e}"); return None; }
+    };
+    let _ = sock.set_read_timeout(Some(TIMEOUT));
+    let _ = sock.set_write_timeout(Some(TIMEOUT));
 
     let mut tls = rustls::StreamOwned::new(conn, sock);
-    write!(
+    if let Err(e) = write!(
         tls,
         "GET /{path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: cue-updater\r\nConnection: close\r\n\r\n"
-    ).ok()?;
+    ) {
+        crate::clog!("[updater] write GET failed: {e}");
+        return None;
+    }
 
     let mut raw = Vec::new();
-    tls.read_to_end(&mut raw).ok()?;
+    if let Err(e) = tls.read_to_end(&mut raw) {
+        crate::clog!("[updater] read_to_end failed after {} bytes: {e}", raw.len());
+        return None;
+    }
+    crate::clog!("[updater] {host}/{path} -> {} bytes raw", raw.len());
 
-    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n")?;
-    let head = std::str::from_utf8(&raw[..sep]).ok()?;
+    let Some(sep) = raw.windows(4).position(|w| w == b"\r\n\r\n") else {
+        crate::clog!("[updater] no header/body separator found");
+        return None;
+    };
+    let Ok(head) = std::str::from_utf8(&raw[..sep]) else {
+        crate::clog!("[updater] head not valid utf8");
+        return None;
+    };
     let body = raw[sep + 4..].to_vec();
 
     let mut lines = head.lines();
-    let status_line = lines.next()?;
-    let status: u16 = status_line.split_whitespace().nth(1)?.parse().ok()?;
+    let Some(status_line) = lines.next() else { return None; };
+    let Some(status) = status_line.split_whitespace().nth(1).and_then(|s| s.parse().ok()) else {
+        crate::clog!("[updater] bad status line: {status_line}");
+        return None;
+    };
+    crate::clog!("[updater] status={status} status_line={status_line}");
 
     let mut headers = HashMap::new();
     for line in lines {
@@ -71,11 +100,20 @@ fn fetch(url: &str) -> Option<Vec<u8>> {
         match status {
             200 => return Some(body),
             301 | 302 | 303 | 307 | 308 => {
-                current = headers.get("location")?.clone();
+                let Some(loc) = headers.get("location") else {
+                    crate::clog!("[updater] redirect {status} with no Location header");
+                    return None;
+                };
+                crate::clog!("[updater] redirect {status} -> {loc}");
+                current = loc.clone();
             }
-            _ => return None,
+            _ => {
+                crate::clog!("[updater] unexpected status {status} for {current}");
+                return None;
+            }
         }
     }
+    crate::clog!("[updater] too many redirects starting from {url}");
     None
 }
 
@@ -88,33 +126,53 @@ fn parse_version(tag: &str) -> Option<(u32, u32, u32)> {
     Some((major, minor, patch))
 }
 
-fn find_update_url(body: &[u8], current: (u32, u32, u32)) -> Option<String> {
-    let releases: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let releases = releases.as_array()?;
+fn find_tags(xml: &str) -> Vec<String> {
+    let marker = "/releases/tag/";
+    let mut tags = Vec::new();
+    let mut rest = xml;
+    while let Some(pos) = rest.find(marker) {
+        let after = &rest[pos + marker.len()..];
+        let end = after.find(['"', '\'']).unwrap_or(after.len());
+        tags.push(after[..end].to_string());
+        rest = &after[end..];
+    }
+    tags
+}
+
+fn find_update_url(atom: &str, current: (u32, u32, u32)) -> Option<String> {
+    let tags = find_tags(atom);
+    crate::clog!("[updater] {} tag(s) found in feed, current={:?}", tags.len(), current);
 
     let upper = (current.0, current.1 + 1, 0);
-    let mut best: Option<((u32, u32, u32), String)> = None;
+    let mut best: Option<(u32, u32, u32)> = None;
+    let mut best_tag: Option<String> = None;
 
-    for rel in releases {
-        let tag = rel.get("tag_name")?.as_str()?;
-        let Some(v) = parse_version(tag) else { continue };
+    for tag in tags {
+        let Some(v) = parse_version(&tag) else {
+            crate::clog!("[updater] tag {tag} did not parse as version");
+            continue;
+        };
+        crate::clog!("[updater] tag={tag} parsed={:?}", v);
         if v <= current || v >= upper { continue; }
-        if best.as_ref().is_some_and(|(bv, _)| v <= *bv) { continue; }
-
-        let assets = rel.get("assets").and_then(|a| a.as_array())?;
-        let Some(asset) = assets.iter().find(|a|
-            a.get("name").and_then(|n| n.as_str()) == Some(ASSET_NAME)
-        ) else { continue };
-        let Some(dl_url) = asset.get("browser_download_url").and_then(|u| u.as_str()) else { continue };
-
-        best = Some((v, dl_url.to_string()));
+        if best.is_some_and(|bv| v <= bv) { continue; }
+        best = Some(v);
+        best_tag = Some(tag);
     }
 
-    best.map(|(_, url)| url)
+    crate::clog!("[updater] best={:?} tag={:?}", best, best_tag);
+    best_tag.map(|tag| format!("https://github.com/{REPO}/releases/download/{tag}/{ASSET_NAME}"))
 }
 
 pub fn check_and_stage_update() {
-    let Ok(exe) = std::env::current_exe() else { return };
+    if cfg!(debug_assertions) {
+        crate::clog!("[updater] skipped — debug build");
+        return;
+    }
+    crate::clog!("[updater] check_and_stage_update start, current version={}", env!("CARGO_PKG_VERSION"));
+    let Ok(exe) = std::env::current_exe() else {
+        crate::clog!("[updater] current_exe() failed");
+        return;
+    };
 
     let mut dl  = exe.as_os_str().to_owned();
     dl.push(".cueextradl");
@@ -127,12 +185,33 @@ pub fn check_and_stage_update() {
     let _ = std::fs::remove_file(&dl_path);
     let _ = std::fs::remove_file(&upd_path);
 
-    let Some(current) = parse_version(env!("CARGO_PKG_VERSION")) else { return };
+    let Some(current) = parse_version(env!("CARGO_PKG_VERSION")) else {
+        crate::clog!("[updater] failed to parse own CARGO_PKG_VERSION");
+        return;
+    };
 
-    let Some(body) = fetch(&format!("https://api.github.com/repos/{REPO}/releases")) else { return };
-    let Some(url) = find_update_url(&body, current) else { return };
-    let Some(bytes) = fetch(&url) else { return };
+    let Some(body) = fetch(&format!("https://github.com/{REPO}/releases.atom")) else {
+        crate::clog!("[updater] releases feed fetch failed entirely");
+        return;
+    };
+    let atom = String::from_utf8_lossy(&body);
+    let Some(url) = find_update_url(&atom, current) else {
+        crate::clog!("[updater] no matching update found");
+        return;
+    };
+    crate::clog!("[updater] downloading {url}");
+    let Some(bytes) = fetch(&url) else {
+        crate::clog!("[updater] asset download failed");
+        return;
+    };
+    crate::clog!("[updater] downloaded {} bytes", bytes.len());
 
-    if std::fs::write(&dl_path, bytes).is_err() { return; }
-    let _ = std::fs::rename(&dl_path, &upd_path);
+    if let Err(e) = std::fs::write(&dl_path, bytes) {
+        crate::clog!("[updater] write dl_path failed: {e}");
+        return;
+    }
+    match std::fs::rename(&dl_path, &upd_path) {
+        Ok(()) => crate::clog!("[updater] staged update at {upd_path:?}"),
+        Err(e) => crate::clog!("[updater] rename to upd_path failed: {e}"),
+    }
 }
