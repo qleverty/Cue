@@ -27,6 +27,10 @@ pub struct SharedState {
     /// has to wait on this regardless of Loading/Ready.
     pub oplog_state:      Mutex<OplogState>,
     pub pending_pairings: Mutex<Vec<PairingRequest>>,
+    /// Кому МЫ сами нажали "Подключить" и ещё не получили ответа
+    /// (device_id → когда). Только в памяти, на диск не пишется. Нужно, чтобы
+    /// распознать взаимный запрос (оба нажали друг на друга) — см. request_sync.
+    pub pending_outgoing: Mutex<HashMap<String, Instant>>,
     pub sync_status:      Mutex<super::SyncStatus>,
     /// UDP discovery handle — exposes discovered list and ping trigger.
     pub discovered:       super::discovery::Discovery,
@@ -50,11 +54,30 @@ pub struct SharedState {
 pub struct PairingRequest {
     pub device_id:   String,
     pub device_name: String,
-    pub token:       String,
     pub from_ip:     String,
     #[serde(default)]
     pub device_type: DeviceType,
+    /// Только в памяти. Заявка взаимная и мы в ней "проигравшая" сторона
+    /// (см. request_sync): до этого момента ждём accept_sync от второй
+    /// стороны и не показываем баннер. Если не дождались — баннер появится
+    /// как обычная заявка (запасной путь, ручное принятие).
+    #[serde(skip)]
+    pub mutual_wait_until: Option<Instant>,
 }
+
+impl PairingRequest {
+    /// true, пока действует окно ожидания взаимной заявки — заявку нельзя
+    /// ни показывать баннером, ни принимать вручную.
+    pub fn waiting(&self) -> bool {
+        self.mutual_wait_until.is_some_and(|t| Instant::now() < t)
+    }
+}
+
+/// Сколько помним, что мы сами отправили заявку (для распознавания взаимности).
+const OUTGOING_TTL: Duration = Duration::from_secs(600);
+/// Сколько "проигравшая" сторона взаимной заявки ждёт accept_sync, прежде чем
+/// разрешить ручное принятие.
+const MUTUAL_WAIT: Duration = Duration::from_secs(15);
 
 // ── start ─────────────────────────────────────────────────────────────────────
 
@@ -199,7 +222,7 @@ fn serve_ops(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
 
 fn request_sync(mut req: Request, state: &SharedState) {
     #[derive(Deserialize)]
-    struct Body { device_id: String, device_name: String, token: String, #[serde(default)] device_type: DeviceType }
+    struct Body { device_id: String, device_name: String, #[serde(default)] device_type: DeviceType }
 
     let mut buf = String::new();
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
@@ -216,7 +239,38 @@ fn request_sync(mut req: Request, state: &SharedState) {
     }
 
     let from_ip = req.remote_addr().map(|a| a.ip().to_string()).unwrap_or_default();
+
+    // ── взаимная заявка ──────────────────────────────────────────────────
+    // Если МЫ сами недавно нажали "Подключить" на это же устройство — значит
+    // оба хотят друг друга, и если бы обе стороны теперь независимо нажали
+    // "Принять", у каждой родился бы СВОЙ токен, а Peers::add — перезапись
+    // "кто последний" (итог на двух сторонах мог разойтись). Поэтому токен
+    // рождается строго на одной стороне — на той, у кого device_id меньше.
+    // Согласие второй стороны уже есть: она сама нажала "Подключить".
+    let mutual = {
+        let mut out = state.pending_outgoing.lock().unwrap();
+        out.retain(|_, t| t.elapsed() < OUTGOING_TTL);
+        out.contains_key(&b.device_id)
+    };
+    if mutual && state.device_id < b.device_id {
+        crate::clog!("[server] mutual request with {} — we win tie-break, auto-accept", b.device_id);
+        let pr = PairingRequest {
+            device_id:   b.device_id,
+            device_name: b.device_name,
+            from_ip,
+            device_type: b.device_type,
+            mutual_wait_until: None,
+        };
+        accept_pairing(state, &pr);
+        respond(req, 202, "{}");
+        return;
+    }
+
     let device_name_for_notify = b.device_name.clone();
+    let mutual_wait_until = if mutual {
+        crate::clog!("[server] mutual request with {} — we lose tie-break, waiting for accept_sync", b.device_id);
+        Some(Instant::now() + MUTUAL_WAIT)
+    } else { None };
     let is_new;
     {
         let mut pending = state.pending_pairings.lock().unwrap();
@@ -227,27 +281,27 @@ fn request_sync(mut req: Request, state: &SharedState) {
             Some(existing) => {
                 is_new = false;
                 existing.device_name = b.device_name;
-                existing.token       = b.token;
                 existing.from_ip     = from_ip;
                 existing.device_type = b.device_type;
+                if mutual_wait_until.is_some() { existing.mutual_wait_until = mutual_wait_until; }
             }
             None => {
                 is_new = true;
                 pending.push(PairingRequest {
                     device_id:   b.device_id,
                     device_name: b.device_name,
-                    token:       b.token,
                     from_ip,
                     device_type: b.device_type,
+                    mutual_wait_until,
                 });
             }
         }
         save_pending_pairings(state.oplog_path.parent().unwrap_or(std::path::Path::new(".")), &pending);
     }
     // Уведомление — только на действительно новый запрос (не на повторные
-    // от того же устройства) и только если юзер прямо сейчас не смотрит на
-    // вкладку "Синхронизация" — там баннер и так на виду.
-    if is_new && !state.viewing_sync_panel.load(std::sync::atomic::Ordering::Relaxed) {
+    // от того же устройства), не во время ожидания взаимной заявки и только
+    // если юзер прямо сейчас не смотрит на вкладку "Синхронизация".
+    if is_new && !mutual && !state.viewing_sync_panel.load(std::sync::atomic::Ordering::Relaxed) {
         crate::notify::send_no_icon(
             "Запрос на подключение",
             &format!("{device_name_for_notify} хочет синхронизироваться с этим устройством"),
@@ -256,6 +310,75 @@ fn request_sync(mut req: Request, state: &SharedState) {
     // Wake egui so the pairing banner appears immediately.
     state.egui_ctx.request_repaint();
     respond(req, 202, "{}");
+}
+
+/// Принять заявку: секрет генерируется ЗДЕСЬ, на принимающей стороне, а не
+/// вычисляется из device_id (те рассылаются открытым текстом в discovery-
+/// broadcast, детерминированный токен был бы тривиально вычислим любым
+/// слушающим). Секрет никогда не попадает в broadcast — только адресно, в
+/// /1/accept_sync. Зовётся из UI (клик "Принять") и из request_sync
+/// (автопринятие при взаимной заявке).
+pub fn accept_pairing(state: &SharedState, req: &PairingRequest) {
+    use std::io::Read;
+
+    let real_token = crate::project::gen_token();
+
+    state.peers.write().unwrap().add(super::peers::PeerEntry {
+        device_id:      req.device_id.clone(),
+        device_name:    req.device_name.clone(),
+        token:          real_token.clone(),
+        ip_hint:        Some(req.from_ip.clone()),
+        last_synced_at: None,
+        device_type:    req.device_type,
+    });
+    clear_pairing_state(state, &req.device_id);
+    state.ping_tx.try_send(()).ok();
+    state.egui_ctx.request_repaint();
+
+    // Сообщаем инициатору токен — он добавит нас к себе в trusted_peers.
+    let ip       = req.from_ip.clone();
+    let our_id   = state.device_id.clone();
+    let our_name = state.device_name.read().unwrap().clone();
+    // TODO: используем СВОЙ порт вместо порта конкретного пира — отдельная
+    // задача (хранить порт каждого пира), см. поле http_port выше.
+    let port     = state.http_port;
+    std::thread::spawn(move || {
+        let addr = format!("{ip}:{port}");
+        let body = serde_json::json!({
+            "device_id":   our_id,
+            "device_name": our_name,
+            "token":       real_token,
+            "device_type": "desktop",
+        }).to_string();
+        let http = format!(
+            "POST /1/accept_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(), body
+        );
+        match TcpStream::connect_timeout(
+            &addr.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
+            Duration::from_secs(5),
+        ) {
+            Ok(mut s) => {
+                let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
+                let _ = s.write_all(http.as_bytes());
+                let mut buf = [0u8; 64];
+                let _ = s.read(&mut buf);
+                crate::clog!("[server] accept_sync sent to {ip} ok");
+            }
+            Err(e) => crate::clog!("[server] accept_sync to {ip} FAILED: {e}"),
+        }
+    });
+}
+
+/// Забыть всё "незавершённое" про это устройство: входящую заявку и нашу
+/// собственную исходящую. Зовётся, когда пейринг завершён.
+fn clear_pairing_state(state: &SharedState, device_id: &str) {
+    {
+        let mut pending = state.pending_pairings.lock().unwrap();
+        pending.retain(|r| r.device_id != device_id);
+        save_pending_pairings(state.oplog_path.parent().unwrap_or(std::path::Path::new(".")), &pending);
+    }
+    state.pending_outgoing.lock().unwrap().remove(device_id);
 }
 
 fn accept_sync(mut req: Request, state: &SharedState) {
@@ -281,6 +404,7 @@ fn accept_sync(mut req: Request, state: &SharedState) {
 
     crate::clog!("[server] accept_sync from {} ip={}", b.device_id, from_ip);
 
+    let peer_id = b.device_id.clone();
     let entry = super::peers::PeerEntry {
         device_id:      b.device_id,
         device_name:    b.device_name,
@@ -290,6 +414,9 @@ fn accept_sync(mut req: Request, state: &SharedState) {
         device_type:    b.device_type,
     };
     state.peers.write().unwrap().add(entry);
+    // Пейринг с этим устройством завершён — убираем висящую заявку от него
+    // (если была) и нашу пометку об отправленной.
+    clear_pairing_state(state, &peer_id);
     state.ping_tx.try_send(()).ok();
     state.egui_ctx.request_repaint();
     respond(req, 200, "{}");

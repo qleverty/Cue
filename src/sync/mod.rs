@@ -230,6 +230,7 @@ impl SyncHandle {
             oplog_path:       ops_path,
             oplog_state:      Mutex::new(oplog_state),
             pending_pairings: Mutex::new(server::load_pending_pairings(&dir)),
+            pending_outgoing: Mutex::new(std::collections::HashMap::new()),
             sync_status:      Mutex::new(SyncStatus::default()),
             discovered,
             ping_tx,

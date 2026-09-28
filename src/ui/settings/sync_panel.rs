@@ -79,7 +79,13 @@ pub fn draw(
 
 fn draw_pairing_banner(ui: &mut egui::Ui, sync: &mut SyncHandle) {
     let pending: Vec<PairingRequest> = sync.shared.pending_pairings.lock().unwrap().clone();
-    let Some(req) = pending.first().cloned() else { return; };
+    // Заявки во взаимном ожидании (см. server::request_sync) баннером не
+    // показываем — ждём accept_sync от второй стороны. Когда окно ожидания
+    // истечёт, заявка станет обычной, поэтому просим перерисовку заранее.
+    if pending.iter().any(|r| r.waiting()) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+    }
+    let Some(req) = pending.iter().find(|r| !r.waiting()).cloned() else { return; };
 
     let mut accept = false;
     let mut reject = false;
@@ -301,8 +307,24 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
                             .color(Color32::from_white_alpha(153)),
                     );
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if btn(ui, "Подключить", true).clicked() {
-                            send_pairing_request(sync, peer);
+                        // Если это устройство уже прислало НАМ заявку — вместо
+                        // встречного "Подключить" (породил бы взаимную заявку)
+                        // предлагаем принять существующую.
+                        let incoming = sync.shared.pending_pairings.lock().unwrap()
+                            .iter()
+                            .find(|r| r.device_id == peer.device_id && !r.waiting())
+                            .cloned();
+                        match incoming {
+                            Some(req) => {
+                                if btn(ui, "Принять", true).clicked() {
+                                    accept_pairing(sync, &req);
+                                }
+                            }
+                            None => {
+                                if btn(ui, "Подключить", true).clicked() {
+                                    send_pairing_request(sync, peer);
+                                }
+                            }
                         }
                     });
                 });
@@ -423,20 +445,20 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     )
 }
 
-/// Token is derived deterministically from both device IDs so both sides
-/// independently compute the same value — avoids conflicts if both initiate.
+/// Отправляет пиру заявку на пейринг (POST /1/request_sync). Никакого секрета
+/// в заявке нет — настоящий токен генерирует принимающая сторона при "Принять"
+/// и присылает его нам отдельно в /1/accept_sync (см. server::accept_pairing).
+/// Мы запоминаем, что отправили заявку: если пир одновременно отправит такую
+/// же нам, request_sync распознает взаимность и разрулит её тай-брейком.
 fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer) {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::time::Duration;
 
     let our_id   = sync.shared.device_id.clone();
-    // "token" тут — просто заявочное значение для pending_pairings на
-    // принимающей стороне (не финальный секрет). Настоящий секрет
-    // генерирует получатель при нажатии "Принять" и присылает его нам
-    // отдельно, адресно, в /1/accept_sync — см. accept_pairing().
-    let placeholder_token = String::new();
     let our_name = sync.shared.device_name.read().unwrap().clone();
+    sync.shared.pending_outgoing.lock().unwrap()
+        .insert(peer.device_id.clone(), std::time::Instant::now());
 
     // POST /request_sync to the peer in a background thread.
     // NOTE: we do NOT add to trusted_peers yet — only after the peer accepts
@@ -452,7 +474,6 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
         let body = serde_json::json!({
             "device_id":   our_id,
             "device_name": our_name,
-            "token":       placeholder_token,
             "device_type": "desktop",
         }).to_string();
         let req = format!(
@@ -480,63 +501,7 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
 }
 
 fn accept_pairing(sync: &mut SyncHandle, req: &PairingRequest) {
-    // Настоящий секрет — генерируется ЗДЕСЬ, на принимающей стороне, а не
-    // вычисляется детерминированно из двух device_id (как было раньше —
-    // это делало его тривиально вычислимым любым, кто просто слушает
-    // discovery-broadcast: device_id рассылается открытым текстом). Секрет
-    // никогда не улетает в broadcast — только адресно, в accept_sync ниже.
-    let real_token = crate::project::gen_token();
-
-    // Add the initiator to our trusted peers.
-    let entry = PeerEntry {
-        device_id:      req.device_id.clone(),
-        device_name:    req.device_name.clone(),
-        token:          real_token.clone(),
-        ip_hint:        Some(req.from_ip.clone()),
-        last_synced_at: None,
-        device_type:    req.device_type,
-    };
-    sync.shared.peers.write().unwrap().add(entry);
-    reject_pairing(sync, &req.device_id);
-    sync.shared.ping_tx.try_send(()).ok();
-
-    // Notify the initiator so they can add us to their trusted_peers.
-    let ip       = req.from_ip.clone();
-    let our_id   = sync.shared.device_id.clone();
-    let our_name = sync.shared.device_name.read().unwrap().clone();
-    let token    = real_token;
-    // TODO: тот же пробел, что и выше — используем свой порт вместо
-    // порта конкретного пира.
-    let port     = sync.shared.http_port;
-    std::thread::spawn(move || {
-        use std::io::{Read, Write};
-        use std::net::TcpStream;
-        use std::time::Duration;
-        let addr = format!("{ip}:{port}");
-        let body = serde_json::json!({
-            "device_id":   our_id,
-            "device_name": our_name,
-            "token":       token,
-            "device_type": "desktop",
-        }).to_string();
-        let http = format!(
-            "POST /1/accept_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            body.len(), body
-        );
-        match TcpStream::connect_timeout(
-            &addr.parse().unwrap_or_else(|_| "0.0.0.0:0".parse().unwrap()),
-            Duration::from_secs(5),
-        ) {
-            Ok(mut s) => {
-                let _ = s.set_write_timeout(Some(Duration::from_secs(5)));
-                let _ = s.write_all(http.as_bytes());
-                let mut buf = [0u8; 64];
-                let _ = s.read(&mut buf);
-                crate::clog!("[sync_panel] accept_sync sent to {ip} ok");
-            }
-            Err(e) => crate::clog!("[sync_panel] accept_sync to {ip} FAILED: {e}"),
-        }
-    });
+    crate::sync::server::accept_pairing(&sync.shared, req);
 }
 
 fn reject_pairing(sync: &mut SyncHandle, device_id: &str) {
