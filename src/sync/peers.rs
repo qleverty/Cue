@@ -8,6 +8,12 @@ pub struct PeerEntry {
     pub token:       String,
     /// Last known LAN IP — populated by discovery (Stage 4) or set manually.
     pub ip_hint:     Option<String>,
+    /// Порт HTTP-сервера ЭТОГО пира (у каждого устройства свой, настраивается
+    /// отдельно). Узнаётся из тел request_sync/accept_sync, из discovery и
+    /// обновляется из параметра `port=` аутентифицированных запросов пира.
+    /// У записей, сохранённых до появления поля, — дефолтный порт.
+    #[serde(default = "super::server::default_port")]
+    pub port:        u16,
     /// Unix timestamp (seconds) of the last successful op-pull from this peer.
     #[serde(default)]
     pub last_synced_at: Option<u64>,
@@ -65,14 +71,15 @@ impl Peers {
         self.save();
     }
 
-    /// Update stored ip_hint after successful contact.
-    pub fn update_ip(&mut self, device_id: &str, ip: String) {
-        if let Some(p) = self.list.iter_mut().find(|p| p.device_id == device_id) {
-            if p.ip_hint.as_deref() != Some(&ip) {
-                p.ip_hint = Some(ip);
-                self.save();
-            }
-        }
+    /// Обновить адрес пира (IP + порт его сервера). Сохраняет на диск только
+    /// при реальном изменении. Возвращает true, если адрес изменился.
+    pub fn update_addr(&mut self, device_id: &str, ip: &str, port: u16) -> bool {
+        let Some(p) = self.list.iter_mut().find(|p| p.device_id == device_id) else { return false; };
+        if p.ip_hint.as_deref() == Some(ip) && p.port == port { return false; }
+        p.ip_hint = Some(ip.to_owned());
+        p.port    = port;
+        self.save();
+        true
     }
 
     /// Record the unix timestamp of the last successful pull from this peer.

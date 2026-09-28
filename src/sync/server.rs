@@ -14,11 +14,17 @@ use super::{oplog::Op, peers::Peers, DeviceType, OplogState};
 pub const DEFAULT_PORT: u16 = 52684;
 pub const PROTO_VER: u32 = 1;
 
+/// Для `#[serde(default = "...")]` полей "порт HTTP-сервера пира": у записей и
+/// сообщений от клиентов, где поля ещё не было, подставляем дефолтный порт.
+pub fn default_port() -> u16 { DEFAULT_PORT }
+
 // ── shared state (server + engine both hold an Arc<SharedState>) ─────────────
 
 pub struct SharedState {
     pub device_id:        String,
-    pub device_name:      RwLock<String>,
+    /// Общий Arc с discovery: переименование в настройках сразу видно в
+    /// PING/PONG, а не только после перезапуска.
+    pub device_name:      Arc<RwLock<String>>,
     pub peers:            RwLock<Peers>,
     pub oplog_path:       PathBuf,
     /// Loading/Ready state of the local oplog — see `OplogState` in `sync/mod.rs`.
@@ -36,11 +42,16 @@ pub struct SharedState {
     pub discovered:       super::discovery::Discovery,
     /// Bounded-1 channel: server taps engine on POST /ping_sync.
     pub ping_tx:          mpsc::SyncSender<()>,
-    /// Используется engine.rs для обращения к чужим пирам (по СВОЕМУ
-    /// значению — прим. отдельная задача: сохранять порт КАЖДОГО пира
-    /// отдельно, раз порт теперь настраиваемый индивидуально на каждом
-    /// устройстве; пока не сделано, см. DiscoveryMsg/PeerEntry).
-    pub http_port:        u16,
+    /// НАШ порт HTTP-сервера. Сообщаем его пирам (тела request_sync/
+    /// accept_sync, параметр `port=` наших запросов, discovery). Порт КАЖДОГО
+    /// пира хранится отдельно — в PeerEntry.port, а не здесь.
+    pub http_port:        Arc<std::sync::atomic::AtomicU16>,
+    /// Работающий сейчас HTTP-сервер — нужен, чтобы при смене порта на ходу
+    /// вызвать `unblock()` и заставить серверный поток перебиндиться.
+    pub server_handle:    Mutex<Option<Arc<Server>>>,
+    /// true, пока не удаётся занять текущий порт (занят другим приложением).
+    /// Ставится вместе с системным уведомлением, читается UI.
+    pub server_bind_failed: std::sync::atomic::AtomicBool,
     /// Used by engine to wake egui immediately after delivering ops.
     pub egui_ctx:         egui::Context,
     /// Пишется UI каждый кадр: сейчас открыта именно вкладка "Синхронизация"
@@ -50,11 +61,35 @@ pub struct SharedState {
     pub viewing_sync_panel: std::sync::atomic::AtomicBool,
 }
 
+impl SharedState {
+    /// Текущий порт нашего HTTP-сервера.
+    pub fn port(&self) -> u16 {
+        self.http_port.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Сменить порт на ходу: новое значение подхватят discovery и engine, а
+    /// серверный поток перебиндится (если сейчас как раз ждёт освобождения
+    /// порта — увидит смену на ближайшей итерации сам).
+    pub fn set_port(&self, port: u16) {
+        self.http_port.store(port, std::sync::atomic::Ordering::SeqCst);
+        // Красная пометка относилась к СТАРОМУ порту — сбрасываем сразу, а не
+        // ждём, пока серверный поток начнёт новую попытку bind.
+        self.server_bind_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+        if let Some(server) = self.server_handle.lock().unwrap().clone() {
+            server.unblock();
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct PairingRequest {
     pub device_id:   String,
     pub device_name: String,
     pub from_ip:     String,
+    /// Порт HTTP-сервера отправителя заявки (IP берём с соединения, порт так
+    /// узнать нельзя — он приходит в теле request_sync).
+    #[serde(default = "default_port")]
+    pub port:        u16,
     #[serde(default)]
     pub device_type: DeviceType,
     /// Только в памяти. Заявка взаимная и мы в ней "проигравшая" сторона
@@ -88,33 +123,67 @@ const YIELD_TIMEOUT_MS: u64 = 250;
 static PORT_FAIL_COUNT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 const PORT_FAIL_NOTIFY_THRESHOLD: u8 = 5;
 
-pub fn start(state: Arc<SharedState>, port: u16) -> std::thread::JoinHandle<()> {
+/// Серверный поток. Живёт в цикле "занять порт → обслуживать → (порт сменили)
+/// → занять новый". Желаемый порт читает из `state` каждый раз заново, так что
+/// смена порта на ходу — это просто `set_port()` + `unblock()`.
+pub fn start(state: Arc<SharedState>) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("cue-sync-server".into())
-        .spawn(move || {
-            let server = bind_with_retry(port);
+        .spawn(move || loop {
+            let port = state.port();
+            // None — пока ждали освобождения порта, юзер выбрал другой.
+            let Some(server) = bind_with_retry(port, &state) else { continue; };
+            let server = Arc::new(server);
+            *state.server_handle.lock().unwrap() = Some(Arc::clone(&server));
+            // Порт могли сменить между bind и записью handle — тогда unblock()
+            // из set_port() не нашёл сервера и промахнулся. Досылаем сами
+            // (сообщение unblock ждёт в очереди, цикл ниже сразу завершится).
+            if state.port() != port { server.unblock(); }
+            // Сразу будим engine: его запросы несут наш актуальный port=, так
+            // пиры узнают новый адрес за один проход, не дожидаясь 30с цикла.
+            state.ping_tx.try_send(()).ok();
+
             for req in server.incoming_requests() {
                 handle(req, &state);
             }
+
+            // Сюда попадаем после unblock() (смена порта) либо если сервер
+            // сам отвалился — в обоих случаях просто занимаем порт заново.
+            *state.server_handle.lock().unwrap() = None;
+            drop(server);   // отпускаем порт ДО следующего bind
+            crate::clog!("[sync/server] stopped listening on port {port}");
+            std::thread::sleep(Duration::from_millis(BIND_RETRY_MS));
         })
         .expect("spawn sync server thread")
 }
 
-fn bind_with_retry(port: u16) -> Server {
+/// Занимает порт, ретраится пока не получится. Возвращает None, если за время
+/// ожидания желаемый порт сменился — вызывающий начнёт заново уже с новым.
+fn bind_with_retry(port: u16, state: &SharedState) -> Option<Server> {
+    // Счётчики неудач — на КАЖДЫЙ порт заново: иначе после смены порта
+    // "занят"-уведомление не сработало бы повторно (счётчик уже за порогом),
+    // а "порт освобождён" могло бы прийти по итогам старого порта.
+    PORT_FAIL_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    state.server_bind_failed.store(false, std::sync::atomic::Ordering::SeqCst);
+
     let mut last_yield_sent = Instant::now() - Duration::from_millis(YIELD_RESEND_MS);
     loop {
+        if state.port() != port { return None; }
         match crate::exclusive_bind::bind_exclusive(port) {
             Ok(listener) => match Server::from_listener(listener, None) {
                 Ok(server) => {
                     crate::clog!("[sync/server] bind SUCCEEDED on port {port}");
                     let prev_count = PORT_FAIL_COUNT.swap(0, std::sync::atomic::Ordering::SeqCst);
+                    if state.server_bind_failed.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                        state.egui_ctx.request_repaint();
+                    }
                     if prev_count >= PORT_FAIL_NOTIFY_THRESHOLD {
                         crate::notify::send_no_icon(
                             &format!("Порт {port} освобождён"),
                             "Синхронизация восстановлена",
                         );
                     }
-                    return server;
+                    return Some(server);
                 }
                 Err(e) => crate::clog!("[sync/server] from_listener failed: {e:?}"),
             },
@@ -122,6 +191,8 @@ fn bind_with_retry(port: u16) -> Server {
         }
         let fails = PORT_FAIL_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         if fails == PORT_FAIL_NOTIFY_THRESHOLD {
+            state.server_bind_failed.store(true, std::sync::atomic::Ordering::SeqCst);
+            state.egui_ctx.request_repaint();
             crate::notify::send_no_icon(
                 &format!("Порт {port} занят другим приложением"),
                 "Синхронизация недоступна",
@@ -203,7 +274,7 @@ fn hello(req: Request, state: &SharedState) {
 }
 
 fn serve_ops(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
-    if !authed(params, &state.peers) { respond(req, 403, ""); return; }
+    if !authed(&req, params, state) { respond(req, 403, ""); return; }
 
     let since: u64 = params.get("since")
         .and_then(|s| s.parse().ok())
@@ -222,7 +293,12 @@ fn serve_ops(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
 
 fn request_sync(mut req: Request, state: &SharedState) {
     #[derive(Deserialize)]
-    struct Body { device_id: String, device_name: String, #[serde(default)] device_type: DeviceType }
+    struct Body {
+        device_id: String,
+        device_name: String,
+        #[serde(default)] device_type: DeviceType,
+        #[serde(default = "default_port")] port: u16,
+    }
 
     let mut buf = String::new();
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
@@ -258,6 +334,7 @@ fn request_sync(mut req: Request, state: &SharedState) {
             device_id:   b.device_id,
             device_name: b.device_name,
             from_ip,
+            port:        b.port,
             device_type: b.device_type,
             mutual_wait_until: None,
         };
@@ -282,6 +359,7 @@ fn request_sync(mut req: Request, state: &SharedState) {
                 is_new = false;
                 existing.device_name = b.device_name;
                 existing.from_ip     = from_ip;
+                existing.port        = b.port;
                 existing.device_type = b.device_type;
                 if mutual_wait_until.is_some() { existing.mutual_wait_until = mutual_wait_until; }
             }
@@ -291,6 +369,7 @@ fn request_sync(mut req: Request, state: &SharedState) {
                     device_id:   b.device_id,
                     device_name: b.device_name,
                     from_ip,
+                    port:        b.port,
                     device_type: b.device_type,
                     mutual_wait_until,
                 });
@@ -328,6 +407,7 @@ pub fn accept_pairing(state: &SharedState, req: &PairingRequest) {
         device_name:    req.device_name.clone(),
         token:          real_token.clone(),
         ip_hint:        Some(req.from_ip.clone()),
+        port:           req.port,
         last_synced_at: None,
         device_type:    req.device_type,
     });
@@ -339,9 +419,8 @@ pub fn accept_pairing(state: &SharedState, req: &PairingRequest) {
     let ip       = req.from_ip.clone();
     let our_id   = state.device_id.clone();
     let our_name = state.device_name.read().unwrap().clone();
-    // TODO: используем СВОЙ порт вместо порта конкретного пира — отдельная
-    // задача (хранить порт каждого пира), см. поле http_port выше.
-    let port     = state.http_port;
+    let port     = req.port;          // порт СЕРВЕРА инициатора
+    let our_port = state.port();      // наш — чтобы он записал нас верно
     std::thread::spawn(move || {
         let addr = format!("{ip}:{port}");
         let body = serde_json::json!({
@@ -349,6 +428,7 @@ pub fn accept_pairing(state: &SharedState, req: &PairingRequest) {
             "device_name": our_name,
             "token":       real_token,
             "device_type": "desktop",
+            "port":        our_port,
         }).to_string();
         let http = format!(
             "POST /1/accept_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -383,7 +463,13 @@ fn clear_pairing_state(state: &SharedState, device_id: &str) {
 
 fn accept_sync(mut req: Request, state: &SharedState) {
     #[derive(Deserialize)]
-    struct Body { device_id: String, device_name: String, token: String, #[serde(default)] device_type: DeviceType }
+    struct Body {
+        device_id: String,
+        device_name: String,
+        token: String,
+        #[serde(default)] device_type: DeviceType,
+        #[serde(default = "default_port")] port: u16,
+    }
 
     let mut buf = String::new();
     if req.as_reader().read_to_string(&mut buf).is_err() { respond(req, 400, ""); return; }
@@ -410,6 +496,7 @@ fn accept_sync(mut req: Request, state: &SharedState) {
         device_name:    b.device_name,
         token:          b.token,
         ip_hint:        Some(from_ip),
+        port:           b.port,
         last_synced_at: None,
         device_type:    b.device_type,
     };
@@ -423,7 +510,7 @@ fn accept_sync(mut req: Request, state: &SharedState) {
 }
 
 fn ping_sync(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
-    if !authed(params, &state.peers) { respond(req, 403, ""); return; }
+    if !authed(&req, params, state) { respond(req, 403, ""); return; }
     // Non-blocking: if the engine is already awake the send simply fails.
     state.ping_tx.try_send(()).ok();
     respond(req, 200, "{}");
@@ -431,11 +518,48 @@ fn ping_sync(req: Request, state: &SharedState, params: &HashMap<&str, &str>) {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-fn authed(params: &HashMap<&str, &str>, peers: &RwLock<Peers>) -> bool {
+/// Проверяет токен. Заодно — раз запрос аутентифицирован — запоминает, где
+/// сейчас живёт этот пир (см. learn_peer_addr).
+fn authed(req: &Request, params: &HashMap<&str, &str>, state: &SharedState) -> bool {
     let token = params.get("token").copied().unwrap_or("");
-    let ok = !token.is_empty() && peers.read().unwrap().find_by_token(token).is_some();
+    let ok = !token.is_empty() && state.peers.read().unwrap().find_by_token(token).is_some();
     crate::clog!("[server] auth token={token:?} ok={ok}");
+    if ok { learn_peer_addr(req, params, state, token); }
     ok
+}
+
+/// Пассивное обновление адреса пира из его аутентифицированного запроса.
+/// IP берём с самого соединения (`remote_addr()`), порт — из параметра `port=`
+/// (порт СЕРВЕРА пира: с соединения его не узнать, там виден лишь случайный
+/// исходящий порт ОС). Так пир, сменивший IP или порт, сам сообщает нам новый
+/// адрес при первом же обращении — а он обращается каждый цикл. Токен уже
+/// проверен, так что подделать это может только тот, кто знает токен.
+fn learn_peer_addr(req: &Request, params: &HashMap<&str, &str>, state: &SharedState, token: &str) {
+    let Some(remote) = req.remote_addr() else { return; };
+    if remote.ip().is_loopback() { return; }   // curl/отладка с этой же машины
+    let ip = remote.ip().to_string();
+
+    let (device_id, cur_port) = {
+        let peers = state.peers.read().unwrap();
+        let Some(p) = peers.find_by_token(token) else { return; };
+        if p.ip_hint.as_deref() == Some(ip.as_str())
+            && params.get("port").and_then(|v| v.parse::<u16>().ok()).map_or(true, |v| v == p.port)
+        {
+            return;   // ничего не изменилось — не берём write-lock
+        }
+        (p.device_id.clone(), p.port)
+    };
+    // Нет валидного port= (старый клиент) — оставляем прежний порт.
+    let port = params.get("port")
+        .and_then(|v| v.parse::<u16>().ok())
+        .filter(|&v| v != 0)
+        .unwrap_or(cur_port);
+
+    if state.peers.write().unwrap().update_addr(&device_id, &ip, port) {
+        crate::clog!("[server] peer {device_id} address updated → {ip}:{port}");
+        state.ping_tx.try_send(()).ok();   // пусть engine сразу проверит новый адрес
+        state.egui_ctx.request_repaint();
+    }
 }
 
 fn parse_query<'q>(query: &'q str) -> HashMap<&'q str, &'q str> {

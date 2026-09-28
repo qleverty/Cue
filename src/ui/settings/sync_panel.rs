@@ -18,6 +18,19 @@ static DESKTOP_PNG: &[u8] = include_bytes!("../../../pics/desktop.png");
 /// считает именно символы, не байты, так что кириллица не режется криво).
 const DEVICE_NAME_MAX_CHARS: usize = 32;
 
+/// Допустимый диапазон порта HTTP-сервера синка. Ниже 1024 — привилегированные
+/// порты; порт discovery (UDP) занимать нельзя.
+const PORT_MIN: u16 = 1024;
+
+/// Красный ошибок — тот же, что у кнопки закрытия окна (main.rs, settings.rs).
+const ERROR_RED: Color32 = Color32::from_rgb(220, 50, 50);
+
+/// Списки (подключённые / найденные) показывают до стольких строк, дальше —
+/// скролл. Высота строк фиксированная, чтобы "ровно три" было ровно тремя.
+const LIST_MAX_ROWS: f32 = 3.0;
+const PEER_ROW_H:    f32 = 38.0;
+const FOUND_ROW_H:   f32 = 28.0;
+
 // ── state ─────────────────────────────────────────────────────────────────────
 
 pub enum ScanState {
@@ -37,6 +50,25 @@ pub struct SyncPanelState {
     /// Mirrors `sync.identity.device_name` for the editable name field.
     device_name_buf:   String,
     name_initialized:  bool,
+    /// Редактируемое поле порта (только цифры).
+    port_buf:          String,
+    port_initialized:  bool,
+    /// Поле порта правили с тех пор, как оно последний раз "применялось":
+    /// красный цвет ошибки при этом гаснет сразу, не дожидаясь Enter.
+    port_dirty:        bool,
+    /// Низ содержимого вкладки относительно верха окна (для авто-высоты).
+    content_bottom:    f32,
+}
+
+impl SyncPanelState {
+    /// Высота окна для вкладки "Синхронизация": ровно по содержимому.
+    pub fn window_height(&self) -> f32 {
+        if self.content_bottom > 0.0 {
+            self.content_bottom.ceil()
+        } else {
+            crate::settings::SH_SYNC   // первый кадр, содержимое ещё не измерено
+        }
+    }
 }
 
 impl Default for SyncPanelState {
@@ -45,6 +77,10 @@ impl Default for SyncPanelState {
             scan_state:       ScanState::default(),
             device_name_buf:  String::new(),
             name_initialized: false,
+            port_buf:         String::new(),
+            port_initialized: false,
+            port_dirty:       false,
+            content_bottom:   0.0,
         }
     }
 }
@@ -55,22 +91,30 @@ pub fn draw(
     ui:    &mut egui::Ui,
     state: &mut SyncPanelState,
     sync:  &mut SyncHandle,
+    settings: &mut crate::settings::Settings,
 ) -> bool {
     if !state.name_initialized {
         state.device_name_buf = sync.identity.device_name.clone();
         state.name_initialized = true;
     }
+    if !state.port_initialized {
+        state.port_buf = sync.shared.port().to_string();
+        state.port_initialized = true;
+    }
 
-    egui::Frame::new()
-        .inner_margin(egui::Margin { left: 14, right: 14, top: 14, bottom: 4 })
+    let frame = egui::Frame::new()
+        .inner_margin(egui::Margin { left: 14, right: 14, top: 14, bottom: 14 })
         .show(ui, |ui| {
             draw_pairing_banner(ui, sync);
-            draw_this_device(ui, state, sync);
+            draw_this_device(ui, state, sync, settings);
             sep(ui);
             draw_peers(ui, sync);
             sep(ui);
             draw_discovery(ui, state, sync);
         });
+    // Окно подгоняется под содержимое: низ рамки (вместе с нижним отступом)
+    // и есть нужная высота. Применяет её SettingsUiState::target_height.
+    state.content_bottom = frame.response.rect.bottom() - ui.max_rect().top();
 
     false
 }
@@ -117,7 +161,12 @@ fn draw_pairing_banner(ui: &mut egui::Ui, sync: &mut SyncHandle) {
     if reject { reject_pairing(sync, &req.device_id); }
 }
 
-fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut SyncHandle) {
+fn draw_this_device(
+    ui: &mut egui::Ui,
+    state: &mut SyncPanelState,
+    sync: &mut SyncHandle,
+    settings: &mut crate::settings::Settings,
+) {
     block_title(ui, "Это устройство");
 
     ui.horizontal(|ui| {
@@ -152,16 +201,49 @@ fn draw_this_device(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sy
                 }
             }
 
-            let our_port = sync.shared.http_port;
-            let ip_text = match &sync.local_ip {
-                Some(ip) => format!("{ip} · порт {our_port}"),
-                None     => format!("порт {our_port}"),
-            };
-            ui.label(
-                RichText::new(ip_text)
-                    .size(10.0)
-                    .color(Color32::from_white_alpha(72)),
-            );
+            let our_port = sync.shared.port();
+            let ip_text: Option<String> = sync.local_ip.as_ref().map(|ip| format!("{ip} ·"));
+            ui.horizontal(|ui| {
+                if let Some(text) = ip_text {
+                    ui.label(
+                        RichText::new(text)
+                            .size(10.0)
+                            .color(Color32::from_white_alpha(72)),
+                    );
+                    ui.add_space(4.0);
+                }
+                // Порт занят другим приложением — сам текст порта краснеет.
+                // Как только начинаешь править поле — снова обычный цвет.
+                let failed = sync.shared.server_bind_failed.load(std::sync::atomic::Ordering::Relaxed);
+                let port_color = if failed && !state.port_dirty {
+                    ERROR_RED
+                } else {
+                    Color32::from_white_alpha(130)
+                };
+                let port_resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.port_buf)
+                        .font(egui::FontId::proportional(10.0))
+                        .text_color(port_color)
+                        .frame(egui::Frame::NONE)
+                        .char_limit(5)
+                        .desired_width(34.0),
+                );
+                if port_resp.changed() { state.port_dirty = true; }
+                state.port_buf.retain(|c| c.is_ascii_digit());
+                port_resp.clone().on_hover_text(
+                    "Порт синхронизации (1024–65535). Применяется сразу, без перезапуска."
+                );
+                if port_resp.lost_focus() {
+                    if let Ok(p) = state.port_buf.parse::<u16>() {
+                        if p >= PORT_MIN && p != discovery::UDP_PORT && p != our_port {
+                            apply_port(sync, settings, p);
+                        }
+                    }
+                    // Показываем реально действующее значение (при неверном вводе — откат).
+                    state.port_buf   = sync.shared.port().to_string();
+                    state.port_dirty = false;
+                }
+            });
         });
     });
 }
@@ -180,56 +262,75 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
                 .color(Color32::from_white_alpha(51)),
         );
     } else {
-        for (i, peer) in peers.iter().enumerate() {
-            let status = statuses.get(&peer.device_id).cloned().unwrap_or_default();
-            let (status_color, meta_text) = peer_display(peer, &status);
-            let is_last = i == peers.len() - 1;
-            let mut disconnect = false;
+        // До трёх устройств список просто растёт (окно подстраивается под
+        // него), дальше — скролл.
+        egui::ScrollArea::vertical()
+            .id_salt("sync_peers")
+            .max_height(PEER_ROW_H * LIST_MAX_ROWS)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                for peer in peers.iter() {
+                    let status = statuses.get(&peer.device_id).cloned().unwrap_or_default();
+                    let (status_color, meta_text) = peer_display(peer, &status);
+                    let mut disconnect = false;
 
-            ui.horizontal(|ui| {
-                ui.vertical(|ui| {
-                    ui.add_space(3.0);
-                    ui.label(
-                        RichText::new(&peer.device_name)
-                            .size(12.5)
-                            .color(Color32::from_white_alpha(184)),
-                    );
-                    ui.label(RichText::new(&meta_text).size(10.0).color(status_color));
-                    ui.add_space(3.0);
-                });
+                    ui.allocate_ui_with_layout(
+                        vec2(ui.available_width(), PEER_ROW_H),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            let dis = ui.add(
+                                egui::Label::new(
+                                    RichText::new("Отключить")
+                                        .size(10.0)
+                                        .color(Color32::from_rgba_unmultiplied(255, 80, 80, 115)),
+                                )
+                                .sense(Sense::click())
+                                .selectable(false),
+                            );
+                            if dis.hovered() {
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                // Overdraw with brighter color on hover.
+                                ui.painter().text(
+                                    dis.rect.center(),
+                                    egui::Align2::CENTER_CENTER,
+                                    "Отключить",
+                                    egui::FontId::proportional(10.0),
+                                    Color32::from_rgba_unmultiplied(255, 80, 80, 217),
+                                );
+                            }
+                            if dis.clicked() { disconnect = true; }
+                            // Зазор между именем и "Отключить".
+                            ui.add_space(10.0);
 
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let dis = ui.add(
-                        egui::Label::new(
-                            RichText::new("Отключить")
-                                .size(10.0)
-                                .color(Color32::from_rgba_unmultiplied(255, 80, 80, 115)),
-                        )
-                        .sense(Sense::click())
-                        .selectable(false),
+                            // Имя и статус занимают всё оставшееся место и
+                            // обрезаются многоточием, а не переносятся (иначе
+                            // строка перестала бы быть фиксированной высоты).
+                            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    // (38 − ~27 высоты двух строк) / 2 — центрируем блок.
+                                    ui.add_space(5.0);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&peer.device_name)
+                                                .size(12.5)
+                                                .color(Color32::from_white_alpha(184)),
+                                        )
+                                        .truncate(),
+                                    );
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&meta_text).size(10.0).color(status_color),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                            });
+                        },
                     );
-                    if dis.hovered() {
-                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                        // Overdraw with brighter color on hover.
-                        ui.painter().text(
-                            dis.rect.center(),
-                            egui::Align2::CENTER_CENTER,
-                            "Отключить",
-                            egui::FontId::proportional(10.0),
-                            Color32::from_rgba_unmultiplied(255, 80, 80, 217),
-                        );
-                    }
-                    if dis.clicked() { disconnect = true; }
-                });
+
+                    if disconnect { to_remove = Some(peer.device_id.clone()); }
+                }
             });
-
-            if disconnect { to_remove = Some(peer.device_id.clone()); }
-
-            if !is_last {
-                let y = ui.next_widget_position().y;
-                ui.painter().hline(0.0..=crate::settings::SW, y, (0.5, crate::SEP));
-            }
-        }
     }
 
     if let Some(id) = to_remove {
@@ -279,56 +380,62 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
         ScanState::Idle => {}
 
         ScanState::Scanning { started_at } => {
-            ui.ctx().request_repaint();
-            let elapsed = started_at.elapsed().as_secs_f32();
-            let pulse   = (elapsed * std::f32::consts::TAU).sin() * 0.5 + 0.5;
-            let alpha   = (64.0 + pulse * 128.0) as u8;
-            ui.horizontal(|ui| {
-                let dot_pos = ui.next_widget_position() + vec2(3.0, 7.0);
-                ui.allocate_exact_size(vec2(8.0, 14.0), Sense::hover());
-                ui.painter().circle_filled(
-                    dot_pos, 2.5,
-                    Color32::from_rgba_unmultiplied(59, 130, 246, alpha),
-                );
-                ui.label(
-                    RichText::new("Поиск устройств...")
-                        .size(10.5)
-                        .color(Color32::from_white_alpha(64)),
-                );
-            });
+            // Обычная подпись ровно того же вида и на том же месте, что и
+            // "Устройств не найдено"; меняется только число точек.
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
+            let dots = 1 + ((started_at.elapsed().as_millis() / 400) % 3) as usize;
+            ui.label(
+                RichText::new(format!("Поиск устройств{}", ".".repeat(dots)))
+                    .size(10.5)
+                    .color(Color32::from_white_alpha(64)),
+            );
         }
 
         ScanState::Results(found) => {
-            for peer in found {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(&peer.device_name)
-                            .size(12.5)
-                            .color(Color32::from_white_alpha(153)),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Если это устройство уже прислало НАМ заявку — вместо
-                        // встречного "Подключить" (породил бы взаимную заявку)
-                        // предлагаем принять существующую.
-                        let incoming = sync.shared.pending_pairings.lock().unwrap()
-                            .iter()
-                            .find(|r| r.device_id == peer.device_id && !r.waiting())
-                            .cloned();
-                        match incoming {
-                            Some(req) => {
-                                if btn(ui, "Принять", true).clicked() {
-                                    accept_pairing(sync, &req);
+            egui::ScrollArea::vertical()
+                .id_salt("sync_found")
+                .max_height(FOUND_ROW_H * LIST_MAX_ROWS)
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    for peer in found {
+                        ui.allocate_ui_with_layout(
+                            vec2(ui.available_width(), FOUND_ROW_H),
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                // Если это устройство уже прислало НАМ заявку — вместо
+                                // встречного "Подключить" (породил бы взаимную заявку)
+                                // предлагаем принять существующую.
+                                let incoming = sync.shared.pending_pairings.lock().unwrap()
+                                    .iter()
+                                    .find(|r| r.device_id == peer.device_id && !r.waiting())
+                                    .cloned();
+                                match incoming {
+                                    Some(req) => {
+                                        if btn(ui, "Принять", true).clicked() {
+                                            accept_pairing(sync, &req);
+                                        }
+                                    }
+                                    None => {
+                                        if btn(ui, "Подключить", true).clicked() {
+                                            send_pairing_request(sync, peer);
+                                        }
+                                    }
                                 }
-                            }
-                            None => {
-                                if btn(ui, "Подключить", true).clicked() {
-                                    send_pairing_request(sync, peer);
-                                }
-                            }
-                        }
-                    });
+                                ui.add_space(10.0);   // зазор между именем и кнопкой
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(&peer.device_name)
+                                                .size(12.5)
+                                                .color(Color32::from_white_alpha(153)),
+                                        )
+                                        .truncate(),
+                                    );
+                                });
+                            },
+                        );
+                    }
                 });
-            }
         }
 
         ScanState::Empty => {
@@ -336,7 +443,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
                 ui.label(
                     RichText::new(err)
                         .size(10.5)
-                        .color(Color32::from_rgb(220, 80, 80)),
+                        .color(ERROR_RED),
                 );
             } else {
                 ui.label(
@@ -362,7 +469,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
 /// нужна (см. обсуждение).
 fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
     if status.revoked {
-        return (Color32::from_rgb(200, 45, 45), "Отвязано".to_owned());
+        return (ERROR_RED, "Отвязано".to_owned());
     }
     if status.incompatible {
         // Мы реально достучались до пира (/hello ответил) — просто не
@@ -426,23 +533,33 @@ fn block_title_inline(ui: &mut egui::Ui, text: &str) {
 }
 
 fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
+    const H:     f32 = 19.0;
+    const PAD_X: f32 = 7.0;
+    const RADIUS: f32 = 3.0;
+
     let (fill, text_color) = if primary {
-        (
-            Color32::from_rgba_unmultiplied(59, 130, 246, 64),
-            Color32::from_white_alpha(166),
-        )
+        (Color32::from_rgb(74, 144, 217), Color32::WHITE)          // #4A90D9
     } else {
-        (
-            Color32::from_white_alpha(18),
-            Color32::from_white_alpha(115),
-        )
+        (Color32::from_rgb(60, 60, 60), Color32::from_white_alpha(200)) // #3c3c3c
     };
-    ui.add(
-        egui::Button::new(RichText::new(text).size(10.5).color(text_color))
-            .fill(fill)
-            .stroke(egui::Stroke::NONE)
-            .corner_radius(4.0),
-    )
+    let galley = ui.painter().layout_no_wrap(
+        text.to_owned(), egui::FontId::proportional(9.5), Color32::PLACEHOLDER,
+    );
+    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + PAD_X * 2.0, H), Sense::click());
+
+    let painter = ui.painter();
+    painter.rect_filled(rect, RADIUS, fill);
+    if resp.hovered() {
+        // Контур только при наведении (у egui::Button stroke общий на все состояния).
+        painter.rect_stroke(
+            rect, RADIUS,
+            egui::Stroke::new(1.0, Color32::from_rgb(0x96, 0x96, 0x96)),
+            egui::StrokeKind::Inside,
+        );
+    }
+    painter.galley(rect.center() - galley.size() / 2.0, galley, text_color);
+
+    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Отправляет пиру заявку на пейринг (POST /1/request_sync). Никакого секрета
@@ -465,16 +582,15 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
     // and we receive /accept_sync will we register them.
     let ip      = peer.ip.clone();
     let peer_id = peer.device_id.clone();
-    // TODO: используем СВОЙ порт вместо порта пира — верно, пока у всех
-    // порт дефолтный; ломается, если у пира настроен другой (нужно
-    // отдельно хранить порт каждого пира, см. DiscoveryMsg/PeerEntry).
-    let port    = sync.shared.http_port;
+    let port     = peer.port;                // порт СЕРВЕРА пира (из его discovery)
+    let our_port = sync.shared.port();       // наш — чтобы он записал нас верно
     std::thread::spawn(move || {
         let addr = format!("{ip}:{port}");
         let body = serde_json::json!({
             "device_id":   our_id,
             "device_name": our_name,
             "device_type": "desktop",
+            "port":        our_port,
         }).to_string();
         let req = format!(
             "POST /1/request_sync HTTP/1.0\r\nHost: {addr}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -511,4 +627,14 @@ fn reject_pairing(sync: &mut SyncHandle, device_id: &str) {
         &crate::app_dir(),
         &pending,
     );
+}
+
+/// Сменить порт HTTP-сервера на ходу: сохраняем в настройки и передаём
+/// серверному потоку — он сам перебиндится, а discovery/engine уже читают порт
+/// из общего атомика. Если новый порт занят — уведомление и красная пометка в
+/// UI появятся так же, как при занятом порте на старте.
+fn apply_port(sync: &mut SyncHandle, settings: &mut crate::settings::Settings, port: u16) {
+    settings.http_port = port;
+    settings.save();
+    sync.shared.set_port(port);
 }

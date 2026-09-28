@@ -155,7 +155,7 @@ impl SettingsUiState {
         match self.tab {
             SettingsTab::General  => SH_GENERAL,
             SettingsTab::Projects => SH_PROJECTS,
-            SettingsTab::Sync     => SH_SYNC,
+            SettingsTab::Sync     => self.sync_panel.window_height(),
         }
     }
 }
@@ -177,6 +177,10 @@ pub fn draw_settings_ui(
 
     ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    // Весь текст в окне настроек — интерфейс, а не контент: его нельзя
+    // выделять (иначе по-настоящему редактируемые поля не отличить от текста).
+    // Кликабельные подписи и так делают .selectable(false) сами.
+    ui.style_mut().interaction.selectable_labels = false;
 
     // ── titlebar ──────────────────────────────────────────────────────────────
 
@@ -285,7 +289,7 @@ pub fn draw_settings_ui(
         SettingsTab::Projects =>
             { crate::ui::settings::projects::draw(ui); }
         SettingsTab::Sync     =>
-            { crate::ui::settings::sync_panel::draw(ui, &mut state.sync_panel, sync); }
+            { crate::ui::settings::sync_panel::draw(ui, &mut state.sync_panel, sync, settings); }
     }
 
     (close, state.target_height())

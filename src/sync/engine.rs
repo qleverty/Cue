@@ -1,8 +1,9 @@
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use super::{cursors::Cursors, oplog::Op, server::{SharedState, PROTO_VER}};
 
@@ -10,6 +11,14 @@ const SYNC_INTERVAL:   Duration = Duration::from_secs(30);
 const HTTP_TIMEOUT:    Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT:   Duration = Duration::from_secs(5);
 const NOTIFY_TIMEOUT:  Duration = Duration::from_secs(3);
+
+/// Сколько пир должен быть непрерывно недоступен, чтобы мы начали его искать
+/// через discovery (короткие обрывы/сон не должны сразу слать broadcast).
+const RECOVERY_AFTER:    Duration = Duration::from_secs(60);
+/// Не чаще одного поиска за это время (общий, на всех потерянных пиров сразу).
+const RECOVERY_COOLDOWN: Duration = Duration::from_secs(120);
+/// Сколько ждём PONG-ов после broadcast-PING.
+const RECOVERY_WAIT:     Duration = Duration::from_millis(2000);
 
 // ── pull error ────────────────────────────────────────────────────────────────
 
@@ -53,6 +62,25 @@ pub fn start_notifier(
         .expect("spawn sync notifier thread")
 }
 
+// ── recovery (активный поиск потерявшихся пиров) ──────────────────────────────
+
+/// Состояние поиска пиров, потерявшихся по адресу. Живёт в engine-потоке.
+#[derive(Default)]
+struct Recovery {
+    /// device_id → с какого момента пир НЕПРЕРЫВНО недоступен по адресу.
+    failing:   HashMap<String, Instant>,
+    last_scan: Option<Instant>,
+}
+
+impl Recovery {
+    fn note_failure(&mut self, id: &str) {
+        self.failing.entry(id.to_owned()).or_insert_with(Instant::now);
+    }
+    fn note_reachable(&mut self, id: &str) {
+        self.failing.remove(id);
+    }
+}
+
 // ── main loop ─────────────────────────────────────────────────────────────────
 
 fn run(
@@ -68,10 +96,11 @@ fn run(
     // the file was already loaded synchronously (empty-file path).
     super::ensure_oplog_ready(&dir, &state.oplog_state);
 
+    let mut recovery = Recovery::default();
     loop {
         match ping_rx.recv_timeout(SYNC_INTERVAL) {
             Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {
-                if pull_all(&state, &cursors, &ops_tx).is_err() { break; }
+                if pull_all(&state, &cursors, &ops_tx, &mut recovery).is_err() { break; }
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -85,9 +114,12 @@ fn pull_all(
     state:   &SharedState,
     cursors: &Mutex<Cursors>,
     ops_tx:  &mpsc::Sender<Vec<Op>>,
+    rec:     &mut Recovery,
 ) -> Result<(), ()> {
     let peers = state.peers.read().unwrap().all().to_vec();
     crate::clog!("[engine] pull_all — {} peer(s)", peers.len());
+    // Забываем пиров, которых уже отвязали.
+    rec.failing.retain(|id, _| peers.iter().any(|p| &p.device_id == id));
 
     for peer in peers {
         let Some(ip) = peer.ip_hint else {
@@ -102,10 +134,12 @@ fn pull_all(
         // ── шаг 1: /hello — ВСЕГДА первым, безусловно. Это корень доверия:
         // до него мы не знаем, можно ли вообще понимать ответ этого пира на
         // /1/ops, так что сам /hello не версионирован в пути (см. server.rs).
-        let hello_url = format!("http://{ip}:{}/hello", state.http_port);
+        let hello_url = format!("http://{ip}:{}/hello", peer.port);
 
         #[derive(serde::Deserialize)]
         struct Hello {
+            #[serde(default)]
+            device_id:   String,
             #[serde(default)]
             proto_ver:   u32,
             #[serde(default)]
@@ -117,11 +151,28 @@ fn pull_all(
 
         let hello = match http_get(&hello_url, HTTP_TIMEOUT) {
             Ok(body) => match serde_json::from_str::<Hello>(&body) {
+                // По этому адресу отвечает ДРУГОЕ устройство (например, DHCP
+                // отдал старый IP пира кому-то ещё, или запись указывает на нас
+                // самих). Не наш пир: имя не трогаем, токен не шлём, /ops не
+                // зовём. Считаем "недоступен" — это не отзыв доверия.
+                Ok(h) if h.device_id != peer.device_id => {
+                    crate::clog!(
+                        "[engine] {ip}:{} answers as {:?}, expected {} — not our peer",
+                        peer.port, h.device_id, peer.device_id
+                    );
+                    rec.note_failure(&peer.device_id);
+                    state.sync_status.lock().unwrap().peer_statuses.insert(
+                        peer.device_id.clone(),
+                        super::PeerStatus { online: false, error: true, revoked: false, incompatible: false },
+                    );
+                    continue;
+                }
                 Ok(h)  => h,
                 Err(e) => {
                     // 200, но тело не в нашем формате — не "обрыв связи", а
                     // именно незнакомый/несовместимый пир. Не трогаем /ops.
                     crate::clog!("[engine] /hello UNPARSEABLE from {} ({}): {e}", peer.device_id, ip);
+                    rec.note_reachable(&peer.device_id);
                     state.sync_status.lock().unwrap().peer_statuses.insert(
                         peer.device_id.clone(),
                         super::PeerStatus { online: false, error: false, revoked: false, incompatible: true },
@@ -131,6 +182,7 @@ fn pull_all(
             },
             Err(PullError::Revoked) => {
                 crate::clog!("[engine] REVOKED by {} ({})", peer.device_id, ip);
+                rec.note_reachable(&peer.device_id);
                 state.sync_status.lock().unwrap().peer_statuses.insert(
                     peer.device_id.clone(),
                     super::PeerStatus { online: false, error: false, revoked: true, incompatible: false },
@@ -139,6 +191,7 @@ fn pull_all(
             }
             Err(PullError::Unavailable) => {
                 crate::clog!("[engine] /hello FAILED from {} ({})", peer.device_id, ip);
+                rec.note_failure(&peer.device_id);
                 state.sync_status.lock().unwrap().peer_statuses.insert(
                     peer.device_id.clone(),
                     super::PeerStatus { online: false, error: true, revoked: false, incompatible: false },
@@ -146,6 +199,10 @@ fn pull_all(
                 continue;
             }
         };
+
+        // Нужное устройство по этому адресу ответило (даже если окажется
+        // несовместимым) — искать его через discovery не нужно.
+        rec.note_reachable(&peer.device_id);
 
         // ── шаг 2: проверка совместимости. Направление проверки важно — не
         // "пересечение списков", а "я нахожу СЕБЯ у пира": единственное, что
@@ -192,7 +249,8 @@ fn pull_all(
         // ── шаг 3: /ops — только теперь, только если /hello подтвердил, что
         // мы понимаем формат этого пира.
         let since = cursors.lock().unwrap().get(&peer.device_id);
-        let url   = format!("http://{ip}:{}/1/ops?since={since}&token={}", state.http_port, peer.token);
+        // port= — НАШ порт: пир по нему узнаёт, где нас искать (см. server::learn_peer_addr).
+        let url   = format!("http://{ip}:{}/1/ops?since={since}&token={}&port={}", peer.port, peer.token, state.port());
         crate::clog!("[engine] pulling from {} url={}", peer.device_id, url);
 
         match http_get(&url, HTTP_TIMEOUT) {
@@ -249,7 +307,57 @@ fn pull_all(
             }
         }
     }
+
+    try_recover(state, rec);
     Ok(())
+}
+
+/// Активный поиск пиров, недоступных по сохранённому адресу дольше
+/// RECOVERY_AFTER: broadcast-PING, затем сверка найденных по device_id с
+/// потерянными. Новый адрес принимаем только после /hello на кандидате, где
+/// device_id обязан совпасть. Нужен, когда адрес сменили ОБЕ стороны (или пир
+/// долго был выключен) — если менялась одна, адрес и так обновится пассивно,
+/// см. server::learn_peer_addr.
+fn try_recover(state: &SharedState, rec: &mut Recovery) {
+    let now = Instant::now();
+    let lost: Vec<String> = rec.failing.iter()
+        .filter(|(_, since)| now.duration_since(**since) >= RECOVERY_AFTER)
+        .map(|(id, _)| id.clone())
+        .collect();
+    if lost.is_empty() { return; }
+    if rec.last_scan.is_some_and(|t| now.duration_since(t) < RECOVERY_COOLDOWN) { return; }
+    rec.last_scan = Some(now);
+
+    crate::clog!("[engine] {} peer(s) unreachable for {:?}+ — searching via discovery", lost.len(), RECOVERY_AFTER);
+    state.discovered.send_ping();
+    std::thread::sleep(RECOVERY_WAIT);
+    let found = super::discovery::current(&state.discovered.discovered);
+
+    for id in lost {
+        let Some(d) = found.iter().find(|d| d.device_id == id) else { continue; };
+        let same_addr = state.peers.read().unwrap().find_by_id(&id)
+            .is_some_and(|p| p.ip_hint.as_deref() == Some(d.ip.as_str()) && p.port == d.port);
+        if same_addr { continue; }   // адрес тот же — значит дело не в адресе
+
+        if !verify_peer_at(&d.ip, d.port, &id) {
+            crate::clog!("[engine] discovery candidate {}:{} for {id} failed /hello verification", d.ip, d.port);
+            continue;
+        }
+        if state.peers.write().unwrap().update_addr(&id, &d.ip, d.port) {
+            crate::clog!("[engine] peer {id} found via discovery → {}:{}", d.ip, d.port);
+            rec.note_reachable(&id);
+            state.ping_tx.try_send(()).ok();   // сразу пробуем по новому адресу
+        }
+    }
+}
+
+/// Отвечает ли по этому адресу именно устройство `expected_id`.
+fn verify_peer_at(ip: &str, port: u16, expected_id: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct Id { #[serde(default)] device_id: String }
+    http_get(&format!("http://{ip}:{port}/hello"), NOTIFY_TIMEOUT).ok()
+        .and_then(|body| serde_json::from_str::<Id>(&body).ok())
+        .is_some_and(|h| h.device_id == expected_id)
 }
 
 // ── notify ────────────────────────────────────────────────────────────────────
@@ -263,7 +371,7 @@ fn notify_peers(state: &SharedState) {
             crate::clog!("[notifier] skipping {} — no ip_hint", peer.device_id);
             continue;
         };
-        let url = format!("http://{ip}:{}/1/ping_sync?token={}", state.http_port, peer.token);
+        let url = format!("http://{ip}:{}/1/ping_sync?token={}&port={}", peer.port, peer.token, state.port());
         match http_post(&url, NOTIFY_TIMEOUT) {
             Ok(_)  => crate::clog!("[notifier] ping_sync → {} ok", peer.device_id),
             Err(e) => crate::clog!("[notifier] ping_sync → {} FAILED: {e}", peer.device_id),

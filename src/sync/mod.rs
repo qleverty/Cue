@@ -215,17 +215,24 @@ impl SyncHandle {
         crate::clog!("[sync] peers loaded count={}", peers_loaded.all().len());
 
         let local_ip   = get_lan_ip();
+        // Один общий атомик на discovery, engine, server и UI: порт можно
+        // сменить на ходу (SharedState::set_port), и все сразу видят новое.
+        let http_port  = Arc::new(std::sync::atomic::AtomicU16::new(http_port));
+        // Имя — тоже общее: его меняют в панели синка, а discovery должен
+        // рассылать актуальное (раньше у него была своя копия).
+        let device_name = Arc::new(RwLock::new(identity.device_name.clone()));
         let discovered = discovery::start(
             identity.device_id.clone(),
-            Arc::new(RwLock::new(identity.device_name.clone())),
+            Arc::clone(&device_name),
             local_ip.clone(),
             DeviceType::Desktop,
+            Arc::clone(&http_port),
         );
         crate::clog!("[sync] discovery started");
 
         let shared = Arc::new(SharedState {
             device_id:        identity.device_id.clone(),
-            device_name:      RwLock::new(identity.device_name.clone()),
+            device_name,
             peers:            RwLock::new(peers_loaded),
             oplog_path:       ops_path,
             oplog_state:      Mutex::new(oplog_state),
@@ -235,11 +242,13 @@ impl SyncHandle {
             discovered,
             ping_tx,
             http_port,
+            server_handle:      Mutex::new(None),
+            server_bind_failed: std::sync::atomic::AtomicBool::new(false),
             egui_ctx,
             viewing_sync_panel: std::sync::atomic::AtomicBool::new(false),
         });
 
-        server::start(Arc::clone(&shared), http_port);
+        server::start(Arc::clone(&shared));
         engine::start(Arc::clone(&shared), Arc::clone(&cursors), ops_tx, ping_rx, dir.clone());
         engine::start_notifier(Arc::clone(&shared), notify_rx);
 
