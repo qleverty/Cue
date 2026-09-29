@@ -208,7 +208,7 @@ fn draw_this_device(
                     ui.label(
                         RichText::new(text)
                             .size(10.0)
-                            .color(Color32::from_white_alpha(72)),
+                            .color(Color32::from_white_alpha(90)),
                     );
                     ui.add_space(4.0);
                 }
@@ -230,9 +230,7 @@ fn draw_this_device(
                 );
                 if port_resp.changed() { state.port_dirty = true; }
                 state.port_buf.retain(|c| c.is_ascii_digit());
-                port_resp.clone().on_hover_text(
-                    "Порт синхронизации (1024–65535). Применяется сразу, без перезапуска."
-                );
+                port_resp.clone().on_hover_text("Стандартный: 52684");
                 if port_resp.lost_focus() {
                     if let Ok(p) = state.port_buf.parse::<u16>() {
                         if p >= PORT_MIN && p != discovery::UDP_PORT && p != our_port {
@@ -259,7 +257,7 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
         ui.label(
             RichText::new("Нет подключённых устройств")
                 .size(11.5)
-                .color(Color32::from_white_alpha(51)),
+                .color(Color32::from_white_alpha(90)),
         );
     } else {
         // До трёх устройств список просто растёт (окно подстраивается под
@@ -387,7 +385,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
             ui.label(
                 RichText::new(format!("Поиск устройств{}", ".".repeat(dots)))
                     .size(10.5)
-                    .color(Color32::from_white_alpha(64)),
+                    .color(Color32::from_white_alpha(90)),
             );
         }
 
@@ -449,7 +447,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
                 ui.label(
                     RichText::new("Устройств не найдено")
                         .size(10.5)
-                        .color(Color32::from_white_alpha(64)),
+                        .color(Color32::from_white_alpha(90)),
                 );
             }
         }
@@ -491,7 +489,7 @@ fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
         Some(_) => "Оффлайн".to_owned(),
         None    => "Ожидание…".to_owned(),
     };
-    (Color32::from_white_alpha(72), text)
+    (Color32::from_white_alpha(90), text)
 }
 
 fn format_ago(ts: u64) -> String {
@@ -518,7 +516,7 @@ fn block_title(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .size(10.0)
-            .color(Color32::from_white_alpha(64)),
+            .color(Color32::from_white_alpha(90)),
     );
     ui.add_space(6.0);
 }
@@ -528,38 +526,40 @@ fn block_title_inline(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
             .size(10.0)
-            .color(Color32::from_white_alpha(64)),
+            .color(Color32::from_white_alpha(90)),
     );
 }
 
+/// Текстовая "кнопка" в стиле вкладок настроек (settings.rs::draw_settings_ui) —
+/// без заливки и рамки вообще, только яркость текста меняется по наведению.
+/// primary — акцентные действия (Подключить/Принять) синим, а не белым.
 fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
-    const H:     f32 = 19.0;
-    const PAD_X: f32 = 7.0;
-    const RADIUS: f32 = 3.0;
+    const BLUE:       Color32 = Color32::from_rgb(74, 144, 217);   // #4A90D9
+    const BLUE_HOVER: Color32 = Color32::from_rgb(154, 199, 247);  // светлее — подсветка при наведении
 
-    let (fill, text_color) = if primary {
-        (Color32::from_rgb(74, 144, 217), Color32::WHITE)          // #4A90D9
+    let (color, hover_color) = if primary {
+        (BLUE, BLUE_HOVER)
     } else {
-        (Color32::from_rgb(60, 60, 60), Color32::from_white_alpha(200)) // #3c3c3c
+        (Color32::from_white_alpha(90), Color32::from_white_alpha(160))
     };
-    let galley = ui.painter().layout_no_wrap(
-        text.to_owned(), egui::FontId::proportional(9.5), Color32::PLACEHOLDER,
-    );
-    let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + PAD_X * 2.0, H), Sense::click());
 
-    let painter = ui.painter();
-    painter.rect_filled(rect, RADIUS, fill);
+    let resp = ui.add(
+        egui::Label::new(RichText::new(text).color(color).size(10.5))
+            .sense(Sense::click())
+            .selectable(false),
+    );
     if resp.hovered() {
-        // Контур только при наведении (у egui::Button stroke общий на все состояния).
-        painter.rect_stroke(
-            rect, RADIUS,
-            egui::Stroke::new(1.0, Color32::from_rgb(0x96, 0x96, 0x96)),
-            egui::StrokeKind::Inside,
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        // Перерисовываем текст ярче поверх — тот же приём, что у вкладок настроек.
+        ui.painter().text(
+            resp.rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(10.5),
+            hover_color,
         );
     }
-    painter.galley(rect.center() - galley.size() / 2.0, galley, text_color);
-
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
+    resp
 }
 
 /// Отправляет пиру заявку на пейринг (POST /1/request_sync). Никакого секрета
