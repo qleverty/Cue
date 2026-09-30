@@ -1603,7 +1603,18 @@ impl eframe::App for App {
         } else {
             None
         };
-        let dragging_above_divider = drag_pointer.map_or(false, |p| p.y < divider_y);
+        // Неактивную рутину, которую теперь тоже можно тащить (см. ниже,
+        // условие старта drag), нельзя превратить в главную задачу через
+        // promote — курсор выше разделителя для неё считается НЕ "выше
+        // разделителя", а просто "очень высоко в обычном списке subs". Это
+        // само по себе уже даёт нужный эффект: ветка ниже (вставка по щели)
+        // и так корректно вставляет в самое начало subs, если курсор выше
+        // всех строк — отдельной "верхней" логики писать не пришлось.
+        let dragged_is_active = self.dragging_task
+            .and_then(|i| self.projects[self.active_project_idx].subs.get_index(i))
+            .is_none_or(|(_, t)| project::is_active_task(t));
+        let dragging_above_divider =
+            drag_pointer.map_or(false, |p| p.y < divider_y) && dragged_is_active;
 
         ui.allocate_ui_with_layout(vec2(self.w, main_h), Layout::right_to_left(Align::Center), |ui| {
             ui.add_space(8.0);
@@ -2049,11 +2060,15 @@ impl eframe::App for App {
                                         // Sense::drag() — клик по тексту больше НЕ promote'ит
                                         // (это делает только перетаскивание выше разделителя),
                                         // поэтому click() тут не нужен, только drag.
-                                        let sense = if is_active && !list_locked {
-                                            Sense::drag()
-                                        } else {
-                                            Sense::hover()
-                                        };
+                                        // Тащить можно и неактивную рутину — но только если
+                                        // группировка "неактивные в конце" ВЫКЛЮЧЕНА (иначе
+                                        // их место и так фиксировано отдельным блоком в
+                                        // конце, тащить туда-обратно незачем и запутывало бы
+                                        // саму идею группировки). Курсор-стрелки-во-все-
+                                        // стороны и старт drag ниже используют то же условие.
+                                        let draggable = (is_active || !self.settings.group_inactive_at_end)
+                                            && !list_locked;
+                                        let sense = if draggable { Sense::drag() } else { Sense::hover() };
                                         // Подчёркивание — отдельный, независимый от text_color
                                         // сигнал "это рутина", только у активных строк
                                         // (тусклые/неактивные не подчёркиваем). Через
@@ -2086,10 +2101,10 @@ impl eframe::App for App {
                                         // что тут именно drag, а не клик; клик по тексту
                                         // больше НИЧЕГО не делает — promote теперь только
                                         // через перетаскивание выше разделителя.
-                                        if is_active && !list_locked && label_r.hovered() {
+                                        if draggable && label_r.hovered() {
                                             ctx.set_cursor_icon(egui::CursorIcon::AllScroll);
                                         }
-                                        if is_active && !list_locked && label_r.drag_started() {
+                                        if draggable && label_r.drag_started() {
                                             start_drag = Some(real_i);
                                         }
                                     });

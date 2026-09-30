@@ -30,7 +30,7 @@ pub fn draw(
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         ui.label(RichText::new("При создании новых задач:")
-            .color(Color32::from_white_alpha(120)).size(11.0));
+            .color(Color32::from_white_alpha(90)).size(11.0));
     });
     ui.add_space(6.0);
 
@@ -92,7 +92,7 @@ pub fn draw(
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         ui.label(RichText::new("При запуске:")
-            .color(Color32::from_white_alpha(120)).size(11.0));
+            .color(Color32::from_white_alpha(90)).size(11.0));
     });
     ui.add_space(6.0);
 
@@ -101,7 +101,7 @@ pub fn draw(
         let radio_clicked = ui.add(egui::RadioButton::new(
             settings.startup_mode == StartupMode::LastOpened, "")).clicked();
         ui.add_space(4.0);
-        let label_clicked = toggle_label(ui, "Последний открытый проект");
+        let label_clicked = toggle_label(ui, "Открывать последний проект");
         if radio_clicked || label_clicked {
             settings.startup_mode = StartupMode::LastOpened;
             changed = true;
@@ -127,11 +127,18 @@ pub fn draw(
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         ui.add_space(14.0);
+        ui.label(RichText::new("Прочее:")
+            .color(Color32::from_white_alpha(90)).size(11.0));
+    });
+    ui.add_space(6.0);
+
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
         // Не shared — чисто локальное предпочтение отображения, LWW не нужен.
         let mut v = settings.group_inactive_at_end;
         let checkbox_clicked = ui.checkbox(&mut v, "").changed();
         ui.add_space(4.0);
-        let label_clicked = toggle_label(ui, "Неактивные рутины — в конец списка");
+        let label_clicked = toggle_label(ui, "Неактивные рутины в конце списка");
         if checkbox_clicked || label_clicked {
             settings.group_inactive_at_end = if label_clicked { !settings.group_inactive_at_end } else { v };
             changed = true;
