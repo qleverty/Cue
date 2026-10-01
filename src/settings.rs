@@ -6,7 +6,7 @@ use super::BG;
 
 pub const SW: f32 = 300.0;
 
-pub const SH_GENERAL:  f32 = 360.0;
+pub const SH_GENERAL:  f32 = 384.0;
 pub const SH_PROJECTS: f32 = 160.0;
 pub const SH_SYNC:     f32 = 310.0;
 
@@ -64,11 +64,19 @@ pub struct Settings {
     /// (свитчере), не в шапке с текущим проектом. Тоже чисто локальное.
     #[serde(default)]
     pub show_task_count: bool,
+    /// Удалять задачу, когда у неё были только direct-рутины и все они
+    /// истекли (рутина больше никогда не сработает). Включено — после
+    /// завершения отправитель шлёт DeleteTask; выключено — задача остаётся
+    /// обычной (без рутины). Локальное предпочтение отправителя, не
+    /// синкается: результат уже целиком описан оп-ами, которые он пишет.
+    #[serde(default = "default_delete_spent_routines")]
+    pub delete_spent_routines: bool,
 }
 
 fn default_group_inactive() -> bool { true }
 fn default_http_port() -> u16 { crate::sync::server::DEFAULT_PORT }
 fn default_highlight_routines() -> bool { true }
+fn default_delete_spent_routines() -> bool { true }
 
 impl Settings {
     /// Единая точка применения — и для локального действия в UI, и для
@@ -113,6 +121,7 @@ impl Default for Settings {
             http_port: crate::sync::server::DEFAULT_PORT,
             highlight_routines: true,
             show_task_count: false,
+            delete_spent_routines: true,
         }
     }
 }

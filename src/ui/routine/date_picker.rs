@@ -224,7 +224,6 @@ fn draw_grid(ui: &mut egui::Ui, state: &mut DatePickerState, today_d: u32, today
             Color32::WHITE
         } else if resp.hovered() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-            ui.painter().rect_filled(cell.shrink(2.0), 3.0, Color32::from_white_alpha(12));
             Color32::from_white_alpha(220)
         } else if is_today {
             Color32::from_rgb(220, 180, 40)

@@ -168,6 +168,18 @@ pub fn draw(
             changed = true;
         }
     });
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        ui.add_space(14.0);
+        let mut v = settings.delete_spent_routines;
+        let checkbox_clicked = ui.checkbox(&mut v, "").changed();
+        ui.add_space(4.0);
+        let label_clicked = toggle_label(ui, "Удалять истёкшие рутины");
+        if checkbox_clicked || label_clicked {
+            settings.delete_spent_routines = if label_clicked { !settings.delete_spent_routines } else { v };
+            changed = true;
+        }
+    });
 
     if changed { settings.save(); }
 

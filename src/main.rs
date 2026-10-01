@@ -515,6 +515,36 @@ impl App {
         true
     }
 
+    /// Локальное завершение задачи (зелёная галочка или крестик по активной
+    /// рутине): пишет CompleteTask, применяет его к модели и, если рутина
+    /// оказалась исчерпанной (больше не сработает никогда), а настройка
+    /// `delete_spent_routines` включена — следом шлёт обычный DeleteTask
+    /// (вместе с тумбстоуном, как при ручном удалении). Решение принимается
+    /// здесь, у отправителя, по его настройке — на принимающей стороне
+    /// настройка никак не участвует, поэтому устройства не расходятся.
+    fn complete_task_local(&mut self, idx: usize, task_id: String) {
+        let now        = routine_scheduler::local_now();
+        let project_id = self.projects[idx].id.clone();
+        let _ = self.sync.record_op(sync::oplog::OpKind::CompleteTask {
+            project_id: project_id.clone(),
+            task_id:    task_id.clone(),
+        });
+        let spent = self.projects[idx]
+            .complete_task(&task_id, now, project::current_time())
+            .unwrap_or(false);
+
+        if spent && self.settings.delete_spent_routines {
+            let ts = project::current_time();
+            let _  = self.sync.record_op(sync::oplog::OpKind::DeleteTask {
+                project_id: project_id.clone(), task_id: task_id.clone(),
+            });
+            self.sync.tombstones.add_task(&task_id, &project_id, ts, &self.sync.identity.device_id);
+            self.projects[idx].subs.shift_remove(task_id.as_str());
+            self.projects[idx].main.shift_remove(task_id.as_str());
+        }
+        self.projects[idx].save();
+    }
+
     /// Коммитит текущее состояние окна редактора рутины в модель/оплог/диск —
     /// но только если оно реально отличается от того, что было при open()
     /// (иначе просто открыл посмотреть и закрыл — не спамим SetRoutine).
@@ -1633,13 +1663,7 @@ impl eframe::App for App {
             if tick_resp.clicked() {
                 let idx = self.active_project_idx;
                 if let Some(task_id) = self.projects[idx].main.keys().next().cloned() {
-                    let now = routine_scheduler::local_now();
-                    let _ = self.sync.record_op(sync::oplog::OpKind::CompleteTask {
-                        project_id: self.projects[idx].id.clone(),
-                        task_id:    task_id.clone(),
-                    });
-                    self.projects[idx].complete_task(&task_id, now, project::current_time());
-                    self.projects[idx].save();
+                    self.complete_task_local(idx, task_id);
                 } else if let Some(pos) = self.projects[idx].subs.iter()
                     .position(|(_, t)| project::is_active_task(t))
                 {
@@ -2280,13 +2304,10 @@ impl eframe::App for App {
                     // Крестик по активной рутине = "сделал досрочно, без
                     // main" — первый слой брони, не удаление. Задача не
                     // двигается: остаётся ровно там же, физически.
-                    let task_id    = self.projects[idx].subs.get_index(i).unwrap().0.clone();
-                    let project_id = self.projects[idx].id.clone();
-                    let now        = routine_scheduler::local_now();
-                    let _          = self.sync.record_op(sync::oplog::OpKind::CompleteTask {
-                        project_id, task_id: task_id.clone(),
-                    });
-                    self.projects[idx].complete_task(&task_id, now, project::current_time());
+                    // (Исчерпанную рутину может удалить complete_task_local
+                    // — по настройке delete_spent_routines.)
+                    let task_id = self.projects[idx].subs.get_index(i).unwrap().0.clone();
+                    self.complete_task_local(idx, task_id);
                 } else {
                     // Обычная задача, либо уже неактивная рутина — реальное
                     // удаление, как раньше.

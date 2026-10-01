@@ -101,13 +101,6 @@ impl Routine {
             && self.month.as_ref().map_or(true, |v| v.is_empty())
             && self.direct.as_ref().map_or(true, |v| v.is_empty())
     }
-
-    /// true, если у рутины есть ТОЛЬКО direct-записи (нет week/month).
-    /// Используется, чтобы понять, может ли "исчерпание" direct-дат
-    /// привести к удалению задачи целиком (раздел 2.4 плана).
-    pub fn is_direct_only(&self) -> bool {
-        self.week.is_none() && self.month.is_none() && self.direct.is_some()
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -447,73 +440,73 @@ impl LoadedProject {
         }
     }
 
-    /// `now` — момент выполнения: для локального клика передаётся
-    /// routine_scheduler::local_now(), для входящего по сети CompleteTask-
-    /// опа — op.ts самого опа.
     /// Единая точка завершения задачи — не важно, откуда пришёл вызов:
     /// клик по main-слоту или крестик по активной рутине в subs. Ищет
     /// `task_id` сначала в main, потом в subs, применяет поведение по месту
-    /// находки. Обычная задача — удаляется. Задача с рутиной — гасится
-    /// (active=false) либо удаляется целиком, если рутина исчерпана.
+    /// находки. Обычная задача (без рутины) — удаляется. Задача с рутиной
+    /// НИКОГДА не удаляется отсюда: рутина гасится (active=false), а если
+    /// она исчерпана (больше не сработает никогда) — снимается совсем, и
+    /// задача остаётся обычной. Удалять исчерпанную задачу или нет — решает
+    /// не эта функция, а отправитель: если включена настройка
+    /// `delete_spent_routines`, он следом шлёт обычный DeleteTask.
     ///
-    /// Важно: если задача найдена уже в subs — НЕ трогаем order_key и
-    /// физическую позицию (мутация на месте), физический порядок важен
-    /// для отображения в "плоском" режиме. Из main же выход в subs — это
-    /// всегда новая запись (позиции раньше не было, терять нечего).
-    pub fn complete_task(&mut self, task_id: &str, now: u64, main_ts: u64) -> bool {
+    /// `now` — момент выполнения в локальном базисе (для prune direct-дат):
+    /// для локального клика routine_scheduler::local_now(), для входящего
+    /// по сети опа — op.ts. `ts` — UTC-метка действия (current_time() либо
+    /// op.ts): идёт в main_edited_at и в LWW-гейт снятия рутины.
+    ///
+    /// Возвращает `None`, если задачи нет; `Some(true)`, если рутина была
+    /// исчерпана и снята (задача осталась обычной); иначе `Some(false)`.
+    ///
+    /// Если задача уже в subs — order_key и физическую позицию НЕ трогаем
+    /// (мутация на месте). Из main выход в subs — всегда новая запись в
+    /// конец (позиции раньше не было, терять нечего).
+    pub fn complete_task(&mut self, task_id: &str, now: u64, ts: u64) -> Option<bool> {
         if self.main.contains_key(task_id) {
             let (id, mut task) = self.main.shift_remove_entry(task_id).unwrap();
-            if let Some(routine) = task.routine.as_mut() {
-                crate::routine_scheduler::prune_expired_direct(routine, now);
-                let exhausted = routine.week.is_none()
-                    && routine.month.is_none()
-                    && routine.direct.as_ref().map_or(true, |d| d.is_empty());
-                if !exhausted {
-                    routine.active = false;
-                    task.order_key = self.next_end_key();
-                    self.subs.insert(id, task); // физический конец; display-порядок группирует отдельно
-                }
-                // exhausted — задача просто никуда не возвращается
-            }
-            // task.routine было None — обычная задача, просто пропадает
+            let had_routine = task.routine.is_some();
+            let spent = Self::settle_routine(&mut task, now, ts);
 
-            // Продвигаем в main первую ЭФФЕКТИВНО АКТИВНУЮ sub-задачу (группа
-            // active всегда идёт перед not-active благодаря компаратору
-            // сортировки в load_all_projects/insert — см. is_active_task).
-            // position() — защитная подстраховка на случай рассинхрона
-            // сортировки.
+            // Продвигаем в main первую ЭФФЕКТИВНО АКТИВНУЮ sub-задачу. Это
+            // ДО вставки остатка завершённой задачи: обычная задача (у
+            // которой рутину только что сняли) считается активной и иначе
+            // тут же вернулась бы в main.
             if let Some(pos) = self.subs.iter().position(|(_, t)| is_active_task(t)) {
                 let (next_id, next_task) = self.subs.shift_remove_index(pos).unwrap();
                 self.main.insert(next_id, next_task);
-                self.main_edited_at = main_ts; // UTC, не local_now — тот же базис, что у Promote/AddTask
+                self.main_edited_at = ts; // UTC, не local_now — тот же базис, что у Promote/AddTask
             }
-            return true;
+
+            if had_routine {
+                task.order_key = self.next_end_key();
+                self.subs.insert(id, task); // физический конец; display-порядок группирует отдельно
+            }
+            // had_routine == false — обычная задача, просто пропадает
+            return Some(spent);
         }
 
-        if self.subs.contains_key(task_id) {
-            let has_routine = self.subs.get(task_id).is_some_and(|t| t.routine.is_some());
-            if !has_routine {
-                self.subs.shift_remove(task_id); // обычная задача в subs — просто удаляется
-                return true;
-            }
-            let routine = self.subs.get_mut(task_id).unwrap().routine.as_mut().unwrap();
-            crate::routine_scheduler::prune_expired_direct(routine, now);
-            let exhausted = routine.week.is_none()
-                && routine.month.is_none()
-                && routine.direct.as_ref().map_or(true, |d| d.is_empty());
-            if exhausted {
-                // Тумбстоун не нужен: результат детерминирован из уже
-                // синканных entries + ts, каждое устройство придёт к тому
-                // же выводу само.
-                self.subs.shift_remove(task_id);
-            } else {
-                // НЕ трогаем order_key и физическую позицию — задача
-                // остаётся ровно там же, просто гаснет.
-                self.subs.get_mut(task_id).unwrap().routine.as_mut().unwrap().active = false;
-            }
+        let task = self.subs.get_mut(task_id)?;
+        if task.routine.is_none() {
+            self.subs.shift_remove(task_id); // обычная задача в subs — просто удаляется
+            return Some(false);
+        }
+        Some(Self::settle_routine(task, now, ts))
+    }
+
+    /// Гасит рутину завершённой задачи; если после чистки прошедших
+    /// direct-дат она больше не сработает никогда — снимает её совсем.
+    /// Снятие под LWW-гейтом по routine_edited_at: если расписание
+    /// правили позже этого завершения (пока оп летел), чужую правку не
+    /// затираем — только гасим. Возвращает true, если рутина снята.
+    fn settle_routine(task: &mut TaskData, now: u64, ts: u64) -> bool {
+        let Some(routine) = task.routine.as_mut() else { return false; };
+        crate::routine_scheduler::prune_expired_direct(routine, now);
+        routine.active = false;
+        if routine.is_empty() && ts >= task.routine_edited_at {
+            task.routine = None;
+            task.routine_edited_at = ts;
             return true;
         }
-
         false
     }
 

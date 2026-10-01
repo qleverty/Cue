@@ -130,11 +130,12 @@ pub fn apply_op(
             if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
             let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
             let real_id = projects[idx].id.clone();
-            // op.ts используется и для проверки исчерпания direct-дат, и
-            // для main_edited_at — на входящем опе оба совпадают, точного
-            // локального времени исходного устройства для пересчёта дат
-            // всё равно нет (намеренное упрощение, см. project.rs).
-            if !projects[idx].complete_task(task_id, op.ts, op.ts) { return Vec::new(); }
+            // op.ts используется и для чистки direct-дат, и для
+            // main_edited_at/LWW-гейта — точного локального времени
+            // исходного устройства всё равно нет (намеренное упрощение, см.
+            // project.rs). Удаление исчерпанной задачи сюда НЕ входит —
+            // если оно нужно, отправитель присылает отдельный DeleteTask.
+            if projects[idx].complete_task(task_id, op.ts, op.ts).is_none() { return Vec::new(); }
             vec![real_id]
         }
         OpKind::SetRoutine { project_id, task_id, routine } => {
