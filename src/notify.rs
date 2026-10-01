@@ -10,15 +10,17 @@
 //     std::process::Command, спавним powershell.exe и просим ЕГО дёрнуть
 //     WinRT ToastNotification API. Каждый лишний крейт — лишние байты
 //     в бинарнике, а тут задача копеечная.
-//   - Toast без AUMID (App User Model ID) Windows тихо проглатывает, без
-//     ошибок. Регистрировать свой AUMID (ярлык в Start Menu через COM
-//     IShellLink/IPropertyStore) — отдельная, более объёмная задача на
-//     будущее. Пока используем уже существующий системный AUMID самого
-//     PowerShell — общеизвестный трюк, работает из коробки, минус один:
-//     подпись в шапке тоста будет "Windows PowerShell", а не "Cue".
-//     Иконка и текст при этом полностью наши (см. AUMID ниже —
-//     единственное место, которое придётся поменять, когда сделаем
-//     свой ярлык).
+//   - Toast без зарегистрированного AUMID (App User Model ID) Windows
+//     тихо проглатывает, без ошибок. Свой AUMID "Cue.App" регистрируется
+//     при старте (register_aumid) записью в реестр HKCU\Software\Classes\
+//     AppUserModelId\Cue.App (DisplayName + IconUri) — без ярлыка в Start
+//     Menu, без COM и без новых крейтов. Иконка лежит в app_dir(), а не
+//     рядом с exe, поэтому перенос exe ничего не ломает. Если регистрация
+//     по какой-то причине не удалась — откатываемся на системный AUMID
+//     PowerShell (подпись в шапке будет "Windows PowerShell", но тосты
+//     продолжат показываться).
+//   - Если реестровая регистрация на какой-то версии Windows не даст
+//     тост — запасной план: ярлык в Start Menu (IShellLink/IPropertyStore).
 
 #[cfg(windows)]
 mod imp {
@@ -26,13 +28,108 @@ mod imp {
     use std::os::windows::process::CommandExt;
     use std::process::Command;
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    /// Системный AUMID PowerShell — общеизвестный трюк для показа тостов
-    /// без регистрации собственного AUMID. ЕДИНСТВЕННОЕ место, которое
-    /// нужно будет поменять, когда сделаем свой ярлык в Start Menu —
-    /// больше нигде в модуле ничего трогать не придётся.
-    const AUMID: &str =
+    /// Наш собственный AUMID. МЕНЯТЬ НЕЛЬЗЯ после релиза: по нему Windows
+    /// хранит пользовательские настройки уведомлений и историю.
+    const OWN_AUMID: &str = "Cue.App";
+    /// Подпись в шапке тоста.
+    const DISPLAY_NAME: &str = "Cue";
+    /// Запасной вариант: системный AUMID PowerShell — общеизвестный трюк
+    /// для показа тостов без собственной регистрации.
+    const FALLBACK_AUMID: &str =
         r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe";
+
+    /// true, если register() успешно записал наш AUMID в реестр.
+    static OWN_REGISTERED: AtomicBool = AtomicBool::new(false);
+
+    /// Какой AUMID передавать в CreateToastNotifier.
+    fn aumid() -> &'static str {
+        if OWN_REGISTERED.load(Ordering::Relaxed) { OWN_AUMID } else { FALLBACK_AUMID }
+    }
+
+    // Сырой FFI на advapi32.dll — по той же причине, что kernel32 в
+    // routine_scheduler.rs: библиотека и так есть в любом Windows-процессе,
+    // новых зависимостей в Cargo.toml не появляется.
+    #[allow(non_snake_case)]
+    mod reg {
+        use std::ffi::c_void;
+        pub const HKEY_CURRENT_USER: isize = 0x8000_0001u32 as i32 as isize;
+        pub const KEY_WRITE: u32 = 0x0002_0006;
+        pub const REG_EXPAND_SZ: u32 = 2;
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            pub fn RegCreateKeyExW(
+                hKey: isize, lpSubKey: *const u16, Reserved: u32, lpClass: *const u16,
+                dwOptions: u32, samDesired: u32, lpSecurityAttributes: *const c_void,
+                phkResult: *mut isize, lpdwDisposition: *mut u32,
+            ) -> i32;
+            pub fn RegSetValueExW(
+                hKey: isize, lpValueName: *const u16, Reserved: u32,
+                dwType: u32, lpData: *const u8, cbData: u32,
+            ) -> i32;
+            pub fn RegCloseKey(hKey: isize) -> i32;
+        }
+    }
+
+    /// UTF-16 с нулевым терминатором для Win32.
+    fn wide(s: &str) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    fn set_string(key: isize, name: &str, value: &str) -> bool {
+        let name = wide(name);
+        let data = wide(value);
+        let rc = unsafe {
+            reg::RegSetValueExW(
+                key, name.as_ptr(), 0, reg::REG_EXPAND_SZ,
+                data.as_ptr() as *const u8, (data.len() * 2) as u32,
+            )
+        };
+        rc == 0
+    }
+
+    /// Регистрирует AUMID "Cue.App" (имя + иконка) в HKCU. Идемпотентно,
+    /// права администратора не нужны. Вызывать один раз при старте, до
+    /// первого send(). Иконка — тот же icon.png, что у окна, кладётся в
+    /// app_dir() при первом запуске (или если размер не совпал).
+    pub fn register() {
+        let icon = crate::app_dir().join("cue_toast_icon.png");
+        let png  = crate::ICON_PNG;
+        let stale = std::fs::metadata(&icon).map_or(true, |m| m.len() != png.len() as u64);
+        if stale {
+            let _ = std::fs::create_dir_all(crate::app_dir());
+            if let Err(e) = std::fs::write(&icon, png) {
+                crate::clog!("[notify] не удалось записать иконку для тостов: {e}");
+                return;
+            }
+        }
+        let Some(icon_str) = icon.to_str() else { return; };
+
+        let sub = wide(&format!("Software\\Classes\\AppUserModelId\\{OWN_AUMID}"));
+        let mut key: isize = 0;
+        let mut disposition: u32 = 0;
+        let rc = unsafe {
+            reg::RegCreateKeyExW(
+                reg::HKEY_CURRENT_USER, sub.as_ptr(), 0, std::ptr::null(), 0,
+                reg::KEY_WRITE, std::ptr::null(), &mut key, &mut disposition,
+            )
+        };
+        if rc != 0 {
+            crate::clog!("[notify] RegCreateKeyExW вернул {rc} — остаёмся на AUMID PowerShell");
+            return;
+        }
+        let ok = set_string(key, "DisplayName", DISPLAY_NAME)
+            && set_string(key, "IconUri", icon_str);
+        unsafe { reg::RegCloseKey(key); }
+
+        if ok {
+            OWN_REGISTERED.store(true, Ordering::Relaxed);
+        } else {
+            crate::clog!("[notify] не удалось записать значения AUMID — остаёмся на AUMID PowerShell");
+        }
+    }
 
     /// Не показывать окно консоли при спавне powershell.exe.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -130,7 +227,7 @@ $notifier.Show($toast)
         cmd.args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
                "-WindowStyle", "Hidden", "-File"])
             .arg(script)
-            .arg("-AumId").arg(AUMID)
+            .arg("-AumId").arg(aumid())
             .arg("-Title").arg(title)
             .arg("-Body").arg(body);
         if let Some(icon) = icon {
@@ -146,6 +243,8 @@ $notifier.Show($toast)
 
 #[cfg(not(windows))]
 mod imp {
+    pub fn register() {}
+
     pub fn send(_title: &str, _body: &str, _color_hex: &str) {
         // На остальных ОС уведомлений пока нет вовсе — рутина всё равно
         // активируется молча, как и раньше (см. обсуждение 2026-08-02).
@@ -155,4 +254,5 @@ mod imp {
 }
 
 pub use imp::send;
+pub use imp::register as register_aumid;
 pub use imp::send_no_icon;

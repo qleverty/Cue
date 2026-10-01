@@ -2482,6 +2482,10 @@ fn main() -> eframe::Result<()> {
         let _ = std::fs::write(&updater_path, include_bytes!("../cue-updater.exe"));
     }
 
+    // Регистрируем собственный AUMID для тостов (имя "Cue" + иконка в шапке).
+    // До первого notify::send; при неудаче notify сам откатится на AUMID PowerShell.
+    notify::register_aumid();
+
     let settings = settings::Settings::load();
     let initial_w = settings.last_width.unwrap_or(W);
 
