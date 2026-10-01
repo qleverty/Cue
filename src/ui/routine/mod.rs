@@ -103,6 +103,9 @@ impl RoutineUiState {
             week:               to_opt(self.week.to_strings()),
             month:              to_opt(self.month.to_strings()),
             direct:             to_opt(self.direct.to_strings()),
+            // Cycle в редакторе пока нет вкладки — переносим как есть,
+            // иначе любое сохранение расписания молча стирало бы его.
+            cycle:              self.original.as_ref().and_then(|r| r.cycle.clone()),
             active:             self.active,
             last_triggered_at:  self.last_triggered_at,
         };

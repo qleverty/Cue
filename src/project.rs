@@ -74,6 +74,25 @@ pub fn projects_dir() -> std::path::PathBuf {
     super::app_dir().join("projects")
 }
 
+/// Цикличная рутина: задача снова становится активной через `every`
+/// секунд после последнего выполнения (плавающий интервал, в отличие от
+/// календарных week/month/direct). Один интервал, без списка. Отсчёт идёт
+/// от `max(from, TaskData::completed_at)` в чистом UTC: `from` — точка
+/// старта на момент создания рутины, дальше работает completed_at,
+/// которое приходит по сети вместе с CompleteTask. Цикл с `every == 0`
+/// считается отсутствующим (иначе срабатывал бы на каждом тике). Оба поля
+/// с #[serde(default)] — ошибка в ручной правке JSON не должна ронять
+/// разбор всей рутины (а с ней и файла проекта).
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
+pub struct Cycle {
+    #[serde(default)]
+    pub every: u64,
+    #[serde(default)]
+    pub from:  u64,
+}
+
+fn is_zero_u64(v: &u64) -> bool { *v == 0 }
+
 /// Расписание рутины. week/month/direct — независимые опциональные списки,
 /// могут присутствовать одновременно (см. Cue_Routines_Implementation_Plan.txt,
 /// раздел 1 — это отличается от исходного design-дока, где был единственный
@@ -87,6 +106,9 @@ pub struct Routine {
     pub month:  Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub direct: Option<Vec<String>>,
+    /// Цикличная рутина (см. Cycle). Сосуществует с week/month/direct.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle:  Option<Cycle>,
     #[serde(default)]
     pub active: bool,
     #[serde(default)]
@@ -100,6 +122,7 @@ impl Routine {
         self.week.as_ref().map_or(true, |v| v.is_empty())
             && self.month.as_ref().map_or(true, |v| v.is_empty())
             && self.direct.as_ref().map_or(true, |v| v.is_empty())
+            && self.cycle.as_ref().map_or(true, |c| c.every == 0)
     }
 }
 
@@ -127,6 +150,13 @@ pub struct TaskData {
     /// pos_edited_at выше — отправки самого TransferTask ещё нет.
     #[serde(default)]
     pub transferred_at:    u64,
+    /// Время (UTC, из op.ts) последнего выполнения задачи. Хранится на
+    /// самой задаче, а не в Routine: выполнение может прийти раньше, чем
+    /// SetRoutine, который впервые вешает на задачу рутину, — тогда ему
+    /// больше некуда лечь. Нужно Cycle как база отсчёта; у обычных задач
+    /// всегда 0 (их выполнение удаляет) и в JSON не пишется.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub completed_at:      u64,
 }
 
 /// Эффективно активна ли задача (для сортировки/выбора следующей main).
@@ -312,11 +342,12 @@ impl LoadedProject {
             r.last_triggered_at = t.routine.as_ref().map(|old| old.last_triggered_at)
                 .unwrap_or(r.last_triggered_at);
             let now = crate::routine_scheduler::local_now();
-            if let Some(occ) = crate::routine_scheduler::due_occurrence(r, now) {
+            let utc = current_time();
+            if let Some(ago) = crate::routine_scheduler::due_secs_ago(r, t.completed_at, now, utc) {
                 r.active = true;
                 r.last_triggered_at = now;
                 crate::routine_scheduler::prune_expired_direct(r, now);
-                if now.saturating_sub(occ) <= crate::routine_scheduler::NOTIFY_WINDOW_SECS {
+                if ago <= crate::routine_scheduler::NOTIFY_WINDOW_SECS {
                     crate::notify::send(&t.text, &self.name, &self.color_hex);
                 }
             } else {
@@ -404,7 +435,7 @@ impl LoadedProject {
         let mut task = TaskData {
             text, routine: None, created_at: current_time(), order_key: 0.0,
             text_edited_at: current_time(), routine_edited_at: 0, pos_edited_at: 0,
-            transferred_at: 0,
+            transferred_at: 0, completed_at: 0,
         };
 
         if self.main.is_empty() {
@@ -461,11 +492,19 @@ impl LoadedProject {
     /// Если задача уже в subs — order_key и физическую позицию НЕ трогаем
     /// (мутация на месте). Из main выход в subs — всегда новая запись в
     /// конец (позиции раньше не было, терять нечего).
-    pub fn complete_task(&mut self, task_id: &str, now: u64, ts: u64) -> Option<bool> {
+    ///
+    /// `sender_routine_ts` — `routine_edited_at` отправителя, если у его
+    /// задачи в момент выполнения была рутина (иначе 0; локально всегда 0).
+    /// Если он новее моего — у меня расписание устарело, SetRoutine ещё в
+    /// пути: задачу нельзя считать обычной и удалять, она ведётся как
+    /// рутинная (уходит в subs), а время выполнения запоминается в
+    /// `completed_at` — расписание, пришедшее позже, посчитает от него.
+    pub fn complete_task(&mut self, task_id: &str, now: u64, ts: u64, sender_routine_ts: u64) -> Option<bool> {
         if self.main.contains_key(task_id) {
             let (id, mut task) = self.main.shift_remove_entry(task_id).unwrap();
-            let had_routine = task.routine.is_some();
+            let had_routine = Self::counts_as_routine(&task, sender_routine_ts);
             let spent = Self::settle_routine(&mut task, now, ts);
+            if had_routine { task.completed_at = task.completed_at.max(ts); }
 
             // Продвигаем в main первую ЭФФЕКТИВНО АКТИВНУЮ sub-задачу. Это
             // ДО вставки остатка завершённой задачи: обычная задача (у
@@ -486,11 +525,20 @@ impl LoadedProject {
         }
 
         let task = self.subs.get_mut(task_id)?;
-        if task.routine.is_none() {
+        if !Self::counts_as_routine(task, sender_routine_ts) {
             self.subs.shift_remove(task_id); // обычная задача в subs — просто удаляется
             return Some(false);
         }
-        Some(Self::settle_routine(task, now, ts))
+        let spent = Self::settle_routine(task, now, ts);
+        task.completed_at = task.completed_at.max(ts);
+        Some(spent)
+    }
+
+    /// Вести ли выполнение этой задачи как рутинной: рутина есть у нас, либо
+    /// отправитель знает расписание новее нашего (см. complete_task).
+    fn counts_as_routine(task: &TaskData, sender_routine_ts: u64) -> bool {
+        task.routine.is_some()
+            || (sender_routine_ts > 0 && sender_routine_ts > task.routine_edited_at)
     }
 
     /// Гасит рутину завершённой задачи; если после чистки прошедших

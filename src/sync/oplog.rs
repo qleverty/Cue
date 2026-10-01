@@ -39,8 +39,13 @@ pub enum OpKind {
     /// исчерпана — рутина снимается, задача остаётся обычной. Удаление
     /// такой задачи — отдельный DeleteTask от отправителя (по настройке).
     /// См. LoadedProject::complete_task.
+    ///
+    /// `routine_edited_at` — метка расписания у ОТПРАВИТЕЛЯ, но только если
+    /// у его задачи в этот момент была рутина (иначе 0). Нужна, чтобы
+    /// получатель, у которого SetRoutine ещё не дошёл, не принял задачу за
+    /// обычную и не удалил её (см. LoadedProject::complete_task).
     #[serde(rename = "COMPLETE_TASK")]
-    CompleteTask   { project_id: String, task_id: String },
+    CompleteTask   { project_id: String, task_id: String, #[serde(default)] routine_edited_at: u64 },
     #[serde(rename = "PROMOTE_TASK")]
     PromoteTask    { project_id: String, task_id: String },
     #[serde(rename = "EDIT_TASK")]

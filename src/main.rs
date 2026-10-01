@@ -525,12 +525,27 @@ impl App {
     fn complete_task_local(&mut self, idx: usize, task_id: String) {
         let now        = routine_scheduler::local_now();
         let project_id = self.projects[idx].id.clone();
-        let _ = self.sync.record_op(sync::oplog::OpKind::CompleteTask {
+        // Метка расписания — только если у задачи сейчас есть рутина
+        // (см. OpKind::CompleteTask), иначе 0.
+        let routine_ts = {
+            let p = &self.projects[idx];
+            p.main.get(task_id.as_str()).or_else(|| p.subs.get(task_id.as_str()))
+                .filter(|t| t.routine.is_some())
+                .map_or(0, |t| t.routine_edited_at)
+        };
+        // Время выполнения берём из самого опа, а не вторым current_time():
+        // иначе completed_at у нас и у получателей (op.ts) могло бы
+        // разойтись на секунду.
+        let done_ts = match self.sync.record_op(sync::oplog::OpKind::CompleteTask {
             project_id: project_id.clone(),
             task_id:    task_id.clone(),
-        });
+            routine_edited_at: routine_ts,
+        }) {
+            Ok(op) => op.ts,
+            Err(_) => project::current_time(),
+        };
         let spent = self.projects[idx]
-            .complete_task(&task_id, now, project::current_time())
+            .complete_task(&task_id, now, done_ts, 0)
             .unwrap_or(false);
 
         if spent && self.settings.delete_spent_routines {
@@ -576,6 +591,7 @@ impl App {
         const LOCK_REFRESH_INTERVAL_SECS: u64 = 15 * 60;
 
         let now = routine_scheduler::local_now();
+        let utc = project::current_time(); // для Cycle: интервал в чистом UTC
 
         if now >= self.last_lock_refresh + LOCK_REFRESH_INTERVAL_SECS {
             self.last_lock_refresh = now;
@@ -598,12 +614,12 @@ impl App {
             for task in proj.main.values_mut() {
                 if let Some(routine) = task.routine.as_mut() {
                     if !routine.active {
-                        if let Some(occ) = routine_scheduler::due_occurrence(routine, now) {
+                        if let Some(ago) = routine_scheduler::due_secs_ago(routine, task.completed_at, now, utc) {
                             routine.active = true;
                             routine.last_triggered_at = now;
                             routine_scheduler::prune_expired_direct(routine, now);
                             routine_scheduler::on_activated(&proj.name, &task.text);
-                            if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
+                            if ago <= routine_scheduler::NOTIFY_WINDOW_SECS {
                                 notify::send(&task.text, &proj.name, &proj.color_hex);
                             }
                             changed = true;
@@ -619,12 +635,12 @@ impl App {
             for task in proj.subs.values_mut() {
                 let Some(routine) = task.routine.as_mut() else { continue };
                 if !routine.active {
-                    if let Some(occ) = routine_scheduler::due_occurrence(routine, now) {
+                    if let Some(ago) = routine_scheduler::due_secs_ago(routine, task.completed_at, now, utc) {
                         routine.active = true;
                         routine.last_triggered_at = now;
                         routine_scheduler::prune_expired_direct(routine, now);
                         routine_scheduler::on_activated(&proj.name, &task.text);
-                        if now.saturating_sub(occ) <= routine_scheduler::NOTIFY_WINDOW_SECS {
+                        if ago <= routine_scheduler::NOTIFY_WINDOW_SECS {
                             notify::send(&task.text, &proj.name, &proj.color_hex);
                         }
                         changed = true;
@@ -945,7 +961,7 @@ impl eframe::App for App {
                                 project::TaskData {
                                     text: first, routine: None, created_at: ts, order_key: 0.0,
                                     text_edited_at: ts, routine_edited_at: 0, pos_edited_at: 0,
-                                    transferred_at: 0,
+                                    transferred_at: 0, completed_at: 0,
                                 },
                                 ts,
                             );

@@ -97,7 +97,7 @@ pub fn apply_op(
                 text: text.clone(), routine: None,
                 created_at: op.ts, order_key: 0.0,
                 text_edited_at: op.ts, routine_edited_at: 0, pos_edited_at: 0,
-                transferred_at: 0,
+                transferred_at: 0, completed_at: 0,
             };
             match target {
                 AddTarget::Main => {
@@ -126,7 +126,7 @@ pub fn apply_op(
             projects[idx].main.shift_remove(task_id.as_str());
             vec![real_id]
         }
-        OpKind::CompleteTask { project_id, task_id } => {
+        OpKind::CompleteTask { project_id, task_id, routine_edited_at } => {
             if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
             let Some(idx) = find_task_project(projects, project_id, task_id) else { return Vec::new(); };
             let real_id = projects[idx].id.clone();
@@ -135,7 +135,7 @@ pub fn apply_op(
             // исходного устройства всё равно нет (намеренное упрощение, см.
             // project.rs). Удаление исчерпанной задачи сюда НЕ входит —
             // если оно нужно, отправитель присылает отдельный DeleteTask.
-            if projects[idx].complete_task(task_id, op.ts, op.ts).is_none() { return Vec::new(); }
+            if projects[idx].complete_task(task_id, op.ts, op.ts, *routine_edited_at).is_none() { return Vec::new(); }
             vec![real_id]
         }
         OpKind::SetRoutine { project_id, task_id, routine } => {
@@ -211,6 +211,13 @@ pub fn apply_op(
             // existing_transferred_at=0, и любой перенос выигрывает.
             if existing_transferred_at >= op.ts { return Vec::new(); }
 
+            // completed_at в снепшоте не едет (оно локальная производная от
+            // CompleteTask) — переносим то, что уже лежит на найденной копии.
+            let existing_completed_at = existing
+                .and_then(|idx| projects[idx].main.get(task_id.as_str())
+                    .or_else(|| projects[idx].subs.get(task_id.as_str())))
+                .map_or(0, |t| t.completed_at);
+
             let mut touched = Vec::new();
             if let Some(idx) = existing {
                 let from_real_id = projects[idx].id.clone();
@@ -225,6 +232,7 @@ pub fn apply_op(
                 created_at: final_created_at, order_key: final_order_key,
                 text_edited_at: final_text_ts, routine_edited_at: final_routine_ts,
                 pos_edited_at: final_pos_ts, transferred_at: op.ts,
+                completed_at: existing_completed_at,
             };
             match target {
                 AddTarget::Main => { dest.apply_add_to_main(task_id.clone(), new_task, op.ts); }

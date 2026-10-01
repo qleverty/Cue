@@ -231,6 +231,32 @@ pub fn due_occurrence(routine: &Routine, now: u64) -> Option<u64> {
     candidates.into_iter().flatten().max().filter(|&t| t > routine.last_triggered_at)
 }
 
+/// Момент (UTC), когда Cycle должен сработать: через `every` после
+/// `max(from, completed_at)`. None, если Cycle нет или `every == 0`.
+/// Считается в чистом UTC, а не в local_now(): интервал в секундах не
+/// должен прыгать при смене часового пояса или перехода на летнее время.
+pub fn cycle_due_at(routine: &Routine, completed_at: u64) -> Option<u64> {
+    let c = routine.cycle.as_ref().filter(|c| c.every > 0)?;
+    Some(c.from.max(completed_at).saturating_add(c.every))
+}
+
+/// Сколько секунд назад рутина стала due (0 — прямо сейчас), либо None,
+/// если ещё не пора. Объединяет календарные типы (local_now) и Cycle
+/// (utc_now) — их моменты в разных временных базах, поэтому наружу отдаётся
+/// не момент, а "давность": её и сравнивают с NOTIFY_WINDOW_SECS. Если due
+/// сразу несколько типов — берётся самая свежая. `completed_at` — поле
+/// TaskData (база отсчёта Cycle). Ничего не флипает и не пишет.
+pub fn due_secs_ago(routine: &Routine, completed_at: u64, local_now: u64, utc_now: u64) -> Option<u64> {
+    let cal   = due_occurrence(routine, local_now).map(|occ| local_now.saturating_sub(occ));
+    let cycle = cycle_due_at(routine, completed_at)
+        .filter(|&t| utc_now >= t)
+        .map(|t| utc_now - t);
+    match (cal, cycle) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
 /// Пора ли активировать рутину прямо сейчас? Вызывающий код обязан сам
 /// не звать это для уже активных рутин (routine.active == true) — эта
 /// функция не флипает состояние и ничего не пишет, только отвечает
