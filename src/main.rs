@@ -515,6 +515,22 @@ impl App {
         true
     }
 
+    /// Если зазоры между order_key задач subs стали слишком узкими (см.
+    /// LoadedProject::needs_compaction) — пересчитывает ключи ВСЕХ задач
+    /// проекта и шлёт ОДИН оп CompactOrder со списком id. Звать после
+    /// любого действия, способного сузить зазор (перетаскивание) или
+    /// добавить задачу: чем раньше оп уйдёт, тем меньше шансов на
+    /// конкурирующие MoveTask'и в старом числовом пространстве.
+    fn compact_if_needed(&mut self, idx: usize) {
+        if !self.projects[idx].needs_compaction() { return; }
+        let order = self.projects[idx].compact_order(project::current_time());
+        let _ = self.sync.record_op(sync::oplog::OpKind::CompactOrder {
+            project_id: self.projects[idx].id.clone(),
+            order,
+        });
+        self.projects[idx].save();
+    }
+
     /// Локальное завершение задачи (зелёная галочка или крестик по активной
     /// рутине): пишет CompleteTask, применяет его к модели и, если рутина
     /// оказалась исчерпанной (больше не сработает никогда), а настройка
@@ -978,6 +994,7 @@ impl eframe::App for App {
                             self.projects[idx].add_task(task_id, text, &s);
                         }
                         self.projects[idx].save();
+                        self.compact_if_needed(idx);
                     }
                 }
             }
@@ -2279,6 +2296,9 @@ impl eframe::App for App {
                                     task_id,
                                     order_key,
                                 });
+                                // Перетаскивание — единственное, что сужает зазоры
+                                // (середина между соседями): проверяем сразу.
+                                self.compact_if_needed(idx);
                             }
                             self.dragging_task = None;
                         }
@@ -2381,6 +2401,7 @@ impl eframe::App for App {
                         });
                         self.projects[idx].add_task(task_id, text, &s);
                         self.projects[idx].save();
+                        self.compact_if_needed(idx);
                     } else {
                         self.buf.clear();
                     }

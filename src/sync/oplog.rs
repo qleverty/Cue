@@ -55,6 +55,17 @@ pub enum OpKind {
     /// один, поэтому оп несёт именно ключ сортировки, а не позицию.
     #[serde(rename = "MOVE_TASK")]
     MoveTask       { project_id: String, task_id: String, order_key: f64 },
+    /// Перенумерация order_key ВСЕХ задач subs проекта одним опом — когда
+    /// зазоры между ключами стали слишком узкими (точность f64). `order` —
+    /// id задач subs в итоговом порядке (физический порядок отправителя):
+    /// i-я получает ключ `i * 1000`. Семантика — как N MoveTask'ов с одним
+    /// и тем же ts, но атомарно и одним опом; LWW по pos_edited_at у каждой
+    /// задачи свой. Список (а не сигнал "пересчитай у себя") нужен, чтобы
+    /// ранги известных отправителю задач совпали на всех устройствах, даже
+    /// если у получателя часть задач ещё не долетела. См.
+    /// LoadedProject::apply_compact_order.
+    #[serde(rename = "COMPACT_ORDER")]
+    CompactOrder   { project_id: String, order: Vec<String> },
     /// Полная перезапись расписания задачи. `routine: None` — убрать
     /// рутину целиком (задача остаётся обычной). Без диффов.
     #[serde(rename = "SET_ROUTINE")]
@@ -109,6 +120,7 @@ impl OpKind {
             OpKind::PromoteTask    { project_id, .. } => Some(project_id),
             OpKind::EditTask       { project_id, .. } => Some(project_id),
             OpKind::MoveTask       { project_id, .. } => Some(project_id),
+            OpKind::CompactOrder   { project_id, .. } => Some(project_id),
             OpKind::SetRoutine     { project_id, .. } => Some(project_id),
             OpKind::TransferTask   { from_project_id, .. } => Some(from_project_id),
             OpKind::SetSharedSetting { .. }           => None,
@@ -198,6 +210,7 @@ impl OpLog {
             OpKind::PromoteTask    { .. } => "PROMOTE_TASK",
             OpKind::EditTask       { .. } => "EDIT_TASK",
             OpKind::MoveTask       { .. } => "MOVE_TASK",
+            OpKind::CompactOrder   { .. } => "COMPACT_ORDER",
             OpKind::SetRoutine     { .. } => "SET_ROUTINE",
             OpKind::TransferTask   { .. } => "TRANSFER_TASK",
             OpKind::SetSharedSetting{..}  => "SET_SHARED_SETTING",

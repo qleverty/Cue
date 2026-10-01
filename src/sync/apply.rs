@@ -169,6 +169,18 @@ pub fn apply_op(
             if !projects[idx].apply_move_task(task_id, *order_key, op.ts) { return Vec::new(); }
             vec![real_id]
         }
+        OpKind::CompactOrder { project_id, order } => {
+            if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
+            let Some(p) = projects.iter_mut().find(|p| &p.id == project_id) else { return Vec::new(); };
+            let known = order.iter().filter(|id| p.subs.contains_key(id.as_str())).count();
+            let changed = p.apply_compact_order(order, op.ts);
+            crate::clog!(
+                "[apply] COMPACT_ORDER project={project_id} listed={} known={known} changed={changed}",
+                order.len()
+            );
+            if !changed { return Vec::new(); }
+            vec![project_id.clone()]
+        }
         OpKind::TransferTask {
             task_id, from_project_id, to_project_id, target,
             text, text_edited_at, routine, routine_edited_at,

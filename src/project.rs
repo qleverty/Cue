@@ -29,6 +29,12 @@ fn gen_random_string(len: usize) -> String {
     id
 }
 
+/// Шаг ключей после компакции — как у bootstrap (`i * 1000`).
+pub const COMPACT_STEP: f64 = 1000.0;
+/// Зазор между соседними order_key, ниже которого пора компактировать.
+/// Запас ~4 порядка до реального предела точности f64 при ключах до 1e6.
+pub const COMPACT_GAP: f64 = 1e-6;
+
 pub fn gen_id() -> String {
     gen_random_string(12)
 }
@@ -284,6 +290,57 @@ impl LoadedProject {
             .unwrap_or(self.subs.len());
         self.subs.shift_insert(target, id, task);
         true
+    }
+
+    /// Перенумерация order_key всех задач subs одним махом (см.
+    /// OpKind::CompactOrder). Задача `order[i]` получает ключ `i * 1000`;
+    /// ранги считаются по ВСЕМУ списку отправителя, включая id, которых у
+    /// нас нет (не долетели/удалены/уехали) — они просто пропускаются, но
+    /// ранг не сдвигают. Задачи, которых нет в списке, не трогаем.
+    ///
+    /// LWW по каждой задаче: пропускаем только если у неё метка СТРОГО
+    /// новее (`ts < pos_edited_at`) — её двигали после этой компакции, и
+    /// чужой старый список перебивать нельзя. Равенство проходит
+    /// сознательно: метки в секундах, и перетаскивание с компакцией сразу
+    /// за ним имеют один и тот же ts — иначе пропустили бы как раз только
+    /// что перетащенную задачу. Метку не понижаем (`max`), иначе ранее
+    /// отвергнутый старый MoveTask мог бы внезапно пройти.
+    ///
+    /// В конце — стабильная сортировка subs по ключу: весь код (reorder_sub,
+    /// apply_move_task) опирается на инвариант "физический порядок subs =
+    /// порядок по order_key". Возвращает true, если что-то изменилось.
+    pub fn apply_compact_order(&mut self, order: &[String], ts: u64) -> bool {
+        let mut changed = false;
+        for (rank, id) in order.iter().enumerate() {
+            let Some(task) = self.subs.get_mut(id.as_str()) else { continue; };
+            if ts < task.pos_edited_at { continue; }
+            task.order_key     = rank as f64 * COMPACT_STEP;
+            task.pos_edited_at = task.pos_edited_at.max(ts);
+            changed = true;
+        }
+        if changed {
+            self.subs.sort_by(|_, a, _, b| a.order_key.total_cmp(&b.order_key));
+        }
+        changed
+    }
+
+    /// Локальная компакция: порядок берём из физического порядка subs
+    /// (он же — порядок на экране при выключенной группировке), применяем
+    /// к себе ТОЙ ЖЕ функцией, что и получатели, и отдаём список для опа.
+    pub fn compact_order(&mut self, ts: u64) -> Vec<String> {
+        let order: Vec<String> = self.subs.keys().cloned().collect();
+        self.apply_compact_order(&order, ts);
+        order
+    }
+
+    /// true, если между какими-то соседними задачами subs зазор по
+    /// order_key меньше порога (или ключи равны/идут не по порядку) —
+    /// пора слать CompactOrder. Сужает зазоры только reorder_sub (середина
+    /// между соседями), но проверка дёшева, поэтому её зовут и после
+    /// добавления задачи.
+    pub fn needs_compaction(&self) -> bool {
+        self.subs.values().zip(self.subs.values().skip(1))
+            .any(|(a, b)| b.order_key - a.order_key < COMPACT_GAP)
     }
 
     /// Единая точка применения нового расписания рутины — и для локальной
@@ -741,4 +798,190 @@ pub fn create_default_project() -> LoadedProject {
     );
     proj.save();
     proj
+}
+
+#[cfg(test)]
+mod compact_tests {
+    use super::*;
+
+    fn task(key: f64, stamp: u64) -> TaskData {
+        TaskData {
+            text: String::new(), routine: None, created_at: 0, order_key: key,
+            text_edited_at: 0, routine_edited_at: 0, pos_edited_at: stamp,
+            transferred_at: 0, completed_at: 0,
+        }
+    }
+
+    /// Проект с subs из (id, ключ, метка) в заданном физическом порядке.
+    fn proj(subs: &[(&str, f64, u64)]) -> LoadedProject {
+        let mut p = LoadedProject::new("p".into(), "p".into(), Color32::WHITE, 0);
+        for (id, key, stamp) in subs {
+            p.subs.insert((*id).to_string(), task(*key, *stamp));
+        }
+        p
+    }
+
+    fn ids(p: &LoadedProject) -> Vec<&str> { p.subs.keys().map(String::as_str).collect() }
+    fn keys(p: &LoadedProject) -> Vec<f64> { p.subs.values().map(|t| t.order_key).collect() }
+    fn order(v: &[&str]) -> Vec<String> { v.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn needs_compaction_detects_narrow_equal_and_unsorted() {
+        assert!(!proj(&[]).needs_compaction());
+        assert!(!proj(&[("a", 5.0, 0)]).needs_compaction());
+        assert!(!proj(&[("a", 0.0, 0), ("b", 1000.0, 0), ("c", 2000.0, 0)]).needs_compaction());
+        assert!(proj(&[("a", 0.0, 0), ("b", 1e-7, 0)]).needs_compaction());   // узкий зазор
+        assert!(proj(&[("a", 7.0, 0), ("b", 7.0, 0)]).needs_compaction());    // ничья
+        assert!(proj(&[("a", 9.0, 0), ("b", 1.0, 0)]).needs_compaction());    // не по порядку
+        // отрицательные ключи (next_beg_key) — нормальный случай
+        assert!(!proj(&[("a", -2000.0, 0), ("b", -1000.0, 0), ("c", 0.0, 0)]).needs_compaction());
+    }
+
+    #[test]
+    fn compact_assigns_ranks_stamps_and_sorts() {
+        let mut p = proj(&[("a", 10.5, 1), ("b", 10.6, 1), ("c", 99.0, 1)]);
+        assert!(p.apply_compact_order(&order(&["c", "a", "b"]), 50));
+        assert_eq!(ids(&p), ["c", "a", "b"]);
+        assert_eq!(keys(&p), [0.0, 1000.0, 2000.0]);
+        assert!(p.subs.values().all(|t| t.pos_edited_at == 50));
+    }
+
+    #[test]
+    fn compact_respects_lww_strictly_newer_skipped_equal_applied() {
+        // b двигали позже компакции (метка 60 > 50) — не трогаем; c ровно в
+        // ту же секунду (метка 50 == 50) — применяем; метку не понижаем.
+        let mut p = proj(&[("a", 1.0, 10), ("b", 2.0, 60), ("c", 3.0, 50)]);
+        p.apply_compact_order(&order(&["a", "b", "c"]), 50);
+        let b = &p.subs["b"];
+        assert_eq!((b.order_key, b.pos_edited_at), (2.0, 60));
+        let c = &p.subs["c"];
+        assert_eq!((c.order_key, c.pos_edited_at), (2000.0, 50));
+        assert_eq!(p.subs["a"].order_key, 0.0);
+    }
+
+    #[test]
+    fn compact_unknown_ids_keep_rank_and_unlisted_untouched() {
+        // у получателя нет "ghost" (не долетел) — ранг d всё равно 3000, как у
+        // отправителя; "extra" не в списке — ключ и метка прежние.
+        let mut p = proj(&[("a", 0.3, 0), ("b", 0.4, 0), ("d", 0.5, 0), ("extra", 7777.0, 3)]);
+        p.apply_compact_order(&order(&["a", "b", "ghost", "d"]), 9);
+        assert_eq!(p.subs["a"].order_key, 0.0);
+        assert_eq!(p.subs["b"].order_key, 1000.0);
+        assert_eq!(p.subs["d"].order_key, 3000.0);
+        assert_eq!((p.subs["extra"].order_key, p.subs["extra"].pos_edited_at), (7777.0, 3));
+        assert_eq!(ids(&p), ["a", "b", "d", "extra"]);
+    }
+
+    #[test]
+    fn compact_is_idempotent() {
+        let mut p = proj(&[("a", 0.1, 0), ("b", 0.2, 0), ("c", 0.3, 0)]);
+        p.apply_compact_order(&order(&["a", "b", "c"]), 5);
+        let (k1, i1) = (keys(&p), ids(&p).iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        p.apply_compact_order(&order(&["a", "b", "c"]), 5);
+        assert_eq!(keys(&p), k1);
+        assert_eq!(ids(&p), i1.iter().map(String::as_str).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn compact_ignores_main_and_empty_list() {
+        let mut p = proj(&[("a", 0.1, 0)]);
+        p.main.insert("m".into(), task(0.5, 0));
+        assert!(!p.apply_compact_order(&order(&["m", "zzz"]), 5)); // main не трогаем, zzz нет
+        assert_eq!(p.main["m"].order_key, 0.5);
+        assert!(!p.apply_compact_order(&[], 5));
+    }
+
+    /// Реальный сценарий: каждый раз ставим задачу сразу после первой — зазор
+    /// делится пополам. Проверяем, что needs_compaction срабатывает ДО потери
+    /// точности, а компакция сохраняет порядок и восстанавливает зазоры.
+    #[test]
+    fn repeated_drag_into_same_gap_triggers_compaction_before_ties() {
+        let mut p = proj(&[("a", 0.0, 0), ("b", 1000.0, 0)]);
+        for i in 0..60 { p.subs.insert(format!("x{i}"), task(2000.0 + i as f64 * 1000.0, 0)); }
+
+        let mut compacted_at = None;
+        for i in 0..60 {
+            let from = p.subs.get_index_of(format!("x{i}").as_str()).unwrap();
+            // перед элементом с индексом 1 (то есть сразу после "a")
+            p.reorder_sub(from, Some(1), 100 + i as u64).unwrap();
+            // ключи ни разу не должны слипнуться ДО проверки
+            let ks = keys(&p);
+            assert!(ks.windows(2).all(|w| w[0] < w[1]), "ничья/инверсия на шаге {i}: {ks:?}");
+            if p.needs_compaction() {
+                let before: Vec<String> = p.subs.keys().cloned().collect();
+                let sent = p.compact_order(100 + i as u64);
+                assert_eq!(sent, before, "компакция не должна менять физический порядок");
+                assert_eq!(ids(&p), before.iter().map(String::as_str).collect::<Vec<_>>());
+                assert!(!p.needs_compaction());
+                assert_eq!(keys(&p)[1], 1000.0);
+                compacted_at = Some(i);
+                break;
+            }
+        }
+        let at = compacted_at.expect("компакция так и не сработала");
+        assert!((20..=40).contains(&at), "сработала на шаге {at}, ожидалось ~30");
+    }
+
+    /// Два устройства: отправитель делает перетаскивание + компакцию,
+    /// получатель применяет MoveTask и CompactOrder в любом порядке — итог
+    /// один и тот же, а запоздавший старый MoveTask отвергается.
+    #[test]
+    fn sender_and_receiver_converge_in_any_arrival_order() {
+        let base = [("a", 0.0, 1), ("b", 1e-9, 1), ("c", 2e-9, 1), ("d", 3e-9, 1)];
+        let mut sender = proj(&base);
+        let mut recv_ab = proj(&base);
+        let mut recv_ba = proj(&base);
+
+        let ts = 500;
+        let (moved, key) = sender.reorder_sub(3, Some(1), ts).unwrap(); // d между a и b
+        assert!(sender.needs_compaction());
+        let list = sender.compact_order(ts);
+
+        // получатель 1: MoveTask, потом CompactOrder
+        recv_ab.apply_move_task(&moved, key, ts);
+        recv_ab.apply_compact_order(&list, ts);
+        // получатель 2: наоборот
+        recv_ba.apply_compact_order(&list, ts);
+        recv_ba.apply_move_task(&moved, key, ts);
+
+        for r in [&recv_ab, &recv_ba] {
+            assert_eq!(ids(r), ids(&sender));
+            assert_eq!(keys(r), keys(&sender));
+        }
+        assert_eq!(ids(&sender), ["a", "d", "b", "c"]);
+        assert_eq!(keys(&sender), [0.0, 1000.0, 2000.0, 3000.0]);
+
+        // Запоздавший MoveTask из старого пространства (ts раньше компакции).
+        assert!(!sender.apply_move_task("c", 1e-9, ts - 10));
+        assert_eq!(keys(&sender), [0.0, 1000.0, 2000.0, 3000.0]);
+    }
+
+    #[test]
+    fn compact_order_op_roundtrips_through_json() {
+        use crate::sync::oplog::OpKind;
+        let op = OpKind::CompactOrder { project_id: "p".into(), order: order(&["a", "b"]) };
+        let line = serde_json::to_string(&op).unwrap();
+        assert!(line.contains("COMPACT_ORDER"), "{line}");
+        match serde_json::from_str::<OpKind>(&line).unwrap() {
+            OpKind::CompactOrder { project_id, order: o } => {
+                assert_eq!(project_id, "p");
+                assert_eq!(o, order(&["a", "b"]));
+            }
+            _ => panic!("не тот вариант"),
+        }
+        assert_eq!(op.project_id(), Some("p"));
+        assert_eq!(op.task_id(), None);
+    }
+
+    #[test]
+    fn move_task_already_applied_then_compaction_on_stale_receiver() {
+        // у получателя нет задачи "c", которая есть у отправителя —
+        // ранги остальных всё равно совпадают с отправителем.
+        let mut sender = proj(&[("a", 0.0, 1), ("b", 1.0, 1), ("c", 2.0, 1), ("d", 3.0, 1)]);
+        let mut recv   = proj(&[("a", 0.0, 1), ("b", 1.0, 1), ("d", 3.0, 1)]);
+        let list = sender.compact_order(10);
+        recv.apply_compact_order(&list, 10);
+        assert_eq!(recv.subs["d"].order_key, sender.subs["d"].order_key);
+        assert_eq!(recv.subs["b"].order_key, sender.subs["b"].order_key);
+    }
 }
