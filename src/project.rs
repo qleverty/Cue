@@ -208,6 +208,11 @@ pub struct LoadedProject {
     pub subs:       IndexMap<String, TaskData>,
     pub color_hex:  String,
     pub created_at: u64,
+    /// Время последнего изменения проекта (UTC, секунды) — для сортировки
+    /// списка проектов «по дате изменения». Двигается ТОЛЬКО через
+    /// `touch()` (действия с задачами, rename/recolor), а не каждым
+    /// `save()`: тик рутин, компакция и бутстрап — не правка пользователя.
+    pub last_edited: u64,
     /// true — реальные данные с диска. false — манифестная заглушка
     /// (Ветка Б холодного старта, main.rs), main/subs пока пусты не
     /// потому что проект пуст, а потому что его ещё не прочитали.
@@ -426,11 +431,18 @@ impl LoadedProject {
             main:       IndexMap::new(),
             subs:       IndexMap::new(),
             created_at,
+            last_edited: created_at,
             loaded:     true,
             main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
             order_key: 0.0, order_key_edited_at: 0,
             task_count: 0,
         }
+    }
+
+    /// Отмечает, что проект изменён в момент `ts`. Только вперёд (`max`):
+    /// запоздавший оп со старым ts не должен откатывать дату назад.
+    pub fn touch(&mut self, ts: u64) {
+        self.last_edited = self.last_edited.max(ts);
     }
 
     pub fn main_text(&self) -> Option<&str> {
@@ -447,7 +459,7 @@ impl LoadedProject {
                 main: self.main.clone(),
                 subs: self.subs.clone(),
             },
-            last_edited: current_time(),
+            last_edited: self.last_edited,
             created_at:  self.created_at,
             main_edited_at: self.main_edited_at, name_edited_at: self.name_edited_at, color_edited_at: self.color_edited_at,
             order_key: self.order_key, order_key_edited_at: self.order_key_edited_at,
@@ -468,6 +480,8 @@ impl LoadedProject {
             task_count:         self.task_count,
             has_active_routine: self.has_active_routine(),
             order_key:          self.order_key,
+            created_at:         self.created_at,
+            last_edited:        self.last_edited,
         });
     }
 
@@ -705,6 +719,7 @@ pub fn load_one(id: &str) -> Option<LoadedProject> {
         main:       file.tasks.main,
         subs:       file.tasks.subs,
         created_at: file.created_at,
+        last_edited: file.last_edited.max(file.created_at),
         loaded:     true,
         main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
         order_key: file.order_key, order_key_edited_at: file.order_key_edited_at,
@@ -774,6 +789,7 @@ pub fn load_all_projects() -> Vec<LoadedProject> {
                 main:       file.tasks.main,
                 subs:       file.tasks.subs,
                 created_at: file.created_at,
+                last_edited: file.last_edited.max(file.created_at),
                 loaded:     true,
                 main_edited_at: file.main_edited_at, name_edited_at: file.name_edited_at, color_edited_at: file.color_edited_at,
                 order_key: file.order_key, order_key_edited_at: file.order_key_edited_at,

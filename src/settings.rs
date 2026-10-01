@@ -7,7 +7,10 @@ use super::BG;
 pub const SW: f32 = 300.0;
 
 pub const SH_GENERAL:  f32 = 384.0;
-pub const SH_PROJECTS: f32 = 160.0;
+/// Лейбл + 4 радио (по аналогии с блоками «Основных»: шапка/вкладки/отступ
+/// снизу ~62 + 14 + 18 + 6 + 4×18 + 3×4). Подогнать на глаз, если окно
+/// окажется выше/ниже содержимого.
+pub const SH_PROJECTS: f32 = 184.0;
 pub const SH_SYNC:     f32 = 310.0;
 
 // ── Settings data ─────────────────────────────────────────────────────────────
@@ -24,6 +27,19 @@ pub enum StartupMode {
     #[default]
     LastOpened,
     Fixed,
+}
+
+/// Сортировка списка проектов (свитчер и выпадающий список «Всегда
+/// открывать»). Чисто локальная настройка отображения — не синкается. Сам
+/// порядок считается в `project_sort`; физический порядок `projects` не
+/// меняется. В v2.1 сюда добавится «Произвольный» (по `order_key`).
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum ProjectSort {
+    ByName,
+    #[default]
+    ByColor,
+    ByCreated,
+    ByModified,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -71,6 +87,10 @@ pub struct Settings {
     /// синкается: результат уже целиком описан оп-ами, которые он пишет.
     #[serde(default = "default_delete_spent_routines")]
     pub delete_spent_routines: bool,
+    /// Сортировка списка проектов. Локальная, без _edited_at (как
+    /// show_task_count).
+    #[serde(default)]
+    pub project_sort: ProjectSort,
 }
 
 fn default_group_inactive() -> bool { true }
@@ -122,6 +142,7 @@ impl Default for Settings {
             highlight_routines: true,
             show_task_count: false,
             delete_spent_routines: true,
+            project_sort: ProjectSort::default(),
         }
     }
 }
@@ -296,7 +317,7 @@ pub fn draw_settings_ui(
         SettingsTab::General  =>
             { crate::ui::settings::general::draw(ui, settings, sync, projects); }
         SettingsTab::Projects =>
-            { crate::ui::settings::projects::draw(ui); }
+            { crate::ui::settings::projects::draw(ui, settings); }
         SettingsTab::Sync     =>
             { crate::ui::settings::sync_panel::draw(ui, &mut state.sync_panel, sync, settings); }
     }

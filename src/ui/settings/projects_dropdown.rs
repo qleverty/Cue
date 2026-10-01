@@ -67,7 +67,10 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
                     const ROW_H: f32 = 17.0;
                     let row_font = egui::FontId::proportional(10.5);
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
-                    for p in projects {
+                    // Тот же порядок, что и в списке проектов (настройка «Сортировка
+                    // списка проектов»).
+                    let order = crate::project_sort::display_order(projects, settings.project_sort);
+                    for p in order.iter().map(|&i| &projects[i]) {
                         let is_sel = settings.fixed_project_id.as_deref() == Some(p.id.as_str());
                         let row_w  = ui.available_width();
                         let (rect, resp) = ui.allocate_exact_size(

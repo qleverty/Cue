@@ -26,6 +26,13 @@ pub struct ManifestEntry {
     /// отображения.
     #[serde(default)]
     pub order_key:          f64,
+    /// Для сортировки списка проектов (свитчер рисуется по манифесту ещё до
+    /// чтения файлов проектов). `#[serde(default)]` — записи старого формата
+    /// читаются с нулями.
+    #[serde(default)]
+    pub created_at:         u64,
+    #[serde(default)]
+    pub last_edited:        u64,
 }
 
 /// id проекта → его запись в манифесте.
@@ -96,7 +103,34 @@ pub fn rebuild_from(projects: &[crate::project::LoadedProject]) {
             task_count,
             has_active_routine: p.has_active_routine(),
             order_key:          p.order_key,
+            created_at:         p.created_at,
+            last_edited:        p.last_edited,
         })
     }).collect();
     write_whole(&m);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn old_manifest_entry_without_dates_deserializes_with_zeros() {
+        let json = r##"{"p1":{"name":"A","color_hex":"#ffffff","task_count":3,"has_active_routine":false,"order_key":1000.0}}"##;
+        let m: Manifest = serde_json::from_str(json).unwrap();
+        let e = &m["p1"];
+        assert_eq!((e.created_at, e.last_edited), (0, 0));
+        assert_eq!(e.task_count, 3);
+    }
+
+    #[test]
+    fn new_fields_roundtrip() {
+        let e = ManifestEntry {
+            name: "A".into(), color_hex: "#ffffff".into(), task_count: 1,
+            has_active_routine: false, order_key: 0.0,
+            created_at: 10, last_edited: 20,
+        };
+        let back: ManifestEntry = serde_json::from_str(&serde_json::to_string(&e).unwrap()).unwrap();
+        assert!(back == e);
+    }
 }

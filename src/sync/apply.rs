@@ -25,7 +25,41 @@ pub(crate) fn find_task_project(projects: &[LoadedProject], hint_id: &str, task_
 /// Apply one op to the full mutable state.
 /// Returns project_id'ы, которые были задеты и нуждаются в сохранении на
 /// диск — обычно один, но TransferTask трогает сразу два (откуда и куда).
+///
+/// Заодно двигает `last_edited` задетых проектов на `op.ts` — но только для
+/// опов, которые считаются правкой содержимого проекта (см. `counts_as_edit`).
 pub fn apply_op(
+    op:         &Op,
+    projects:   &mut Vec<LoadedProject>,
+    tombstones: &mut Tombstones,
+    settings:   &mut Settings,
+    seen:       &mut HashSet<String>,
+) -> Vec<String> {
+    let dirty = apply_op_inner(op, projects, tombstones, settings, seen);
+    if counts_as_edit(&op.kind) {
+        for id in &dirty {
+            if let Some(p) = projects.iter_mut().find(|p| &p.id == id) {
+                p.touch(op.ts);
+            }
+        }
+    }
+    dirty
+}
+
+/// Какие опы считаются «изменением проекта» для сортировки по дате
+/// изменения. НЕ считаются: создание (дата = created_at), удаление проекта,
+/// MoveProject (порядок в списке проектов — не содержимое проекта),
+/// CompactOrder (служебная перенумерация) и настройки.
+fn counts_as_edit(kind: &OpKind) -> bool {
+    matches!(kind,
+        OpKind::AddTask { .. }      | OpKind::DeleteTask { .. }
+        | OpKind::CompleteTask { .. } | OpKind::SetRoutine { .. }
+        | OpKind::PromoteTask { .. }  | OpKind::EditTask { .. }
+        | OpKind::MoveTask { .. }     | OpKind::TransferTask { .. }
+        | OpKind::RenameProject { .. } | OpKind::RecolorProject { .. })
+}
+
+fn apply_op_inner(
     op:         &Op,
     projects:   &mut Vec<LoadedProject>,
     tombstones: &mut Tombstones,
@@ -276,5 +310,87 @@ pub fn apply_op(
             if applied { settings.save(); }
             Vec::new()
         }
+    }
+}
+#[cfg(test)]
+mod touch_tests {
+    use super::*;
+    use eframe::egui::Color32;
+
+    fn proj(id: &str, created: u64) -> LoadedProject {
+        LoadedProject::new(id.into(), id.into(), Color32::WHITE, created)
+    }
+
+    fn op(n: u32, ts: u64, kind: OpKind) -> Op {
+        Op { op_id: format!("op{n}"), device_id: "dev".into(), seq: n as u64, ts, kind }
+    }
+
+    /// Применяет оп к одному проекту "p" (created_at = 100) и возвращает его
+    /// last_edited после применения.
+    fn last_edited_after(kinds: Vec<(u64, OpKind)>) -> u64 {
+        let mut projects = vec![proj("p", 100)];
+        let mut tombs = Tombstones::load(std::path::Path::new("/nonexistent-cue-test-dir"));
+        let mut settings = Settings::default();
+        let mut seen = HashSet::new();
+        for (i, (ts, kind)) in kinds.into_iter().enumerate() {
+            apply_op(&op(i as u32, ts, kind), &mut projects, &mut tombs, &mut settings, &mut seen);
+        }
+        projects[0].last_edited
+    }
+
+    fn add_task(task: &str) -> OpKind {
+        OpKind::AddTask {
+            project_id: "p".into(), task_id: task.into(),
+            text: "t".into(), target: AddTarget::End,
+        }
+    }
+
+    #[test]
+    fn task_ops_move_last_edited_to_op_ts() {
+        assert_eq!(last_edited_after(vec![(500, add_task("t1"))]), 500);
+    }
+
+    #[test]
+    fn rename_and_recolor_count_as_edit() {
+        assert_eq!(last_edited_after(vec![
+            (300, OpKind::RenameProject { project_id: "p".into(), name: "x".into() }),
+        ]), 300);
+        assert_eq!(last_edited_after(vec![
+            (400, OpKind::RecolorProject { project_id: "p".into(), color: "#112233".into() }),
+        ]), 400);
+    }
+
+    #[test]
+    fn move_project_and_compact_order_do_not_count() {
+        assert_eq!(last_edited_after(vec![
+            (900, OpKind::MoveProject { project_id: "p".into(), order_key: 5.0 }),
+        ]), 100);
+        assert_eq!(last_edited_after(vec![
+            (900, OpKind::CompactOrder { project_id: "p".into(), order: vec![] }),
+        ]), 100);
+    }
+
+    #[test]
+    fn late_old_op_does_not_roll_last_edited_back() {
+        assert_eq!(last_edited_after(vec![
+            (800, add_task("t1")),
+            (200, add_task("t2")),
+        ]), 800);
+    }
+
+    #[test]
+    fn rejected_op_does_not_touch() {
+        // Задача для несуществующего проекта: apply ничего не задел.
+        let mut projects = vec![proj("p", 100)];
+        let mut tombs = Tombstones::load(std::path::Path::new("/nonexistent-cue-test-dir"));
+        let mut settings = Settings::default();
+        let mut seen = HashSet::new();
+        let kind = OpKind::AddTask {
+            project_id: "other".into(), task_id: "t".into(),
+            text: "t".into(), target: AddTarget::End,
+        };
+        let dirty = apply_op(&op(1, 999, kind), &mut projects, &mut tombs, &mut settings, &mut seen);
+        assert!(dirty.is_empty());
+        assert_eq!(projects[0].last_edited, 100);
     }
 }

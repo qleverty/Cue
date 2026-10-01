@@ -5,7 +5,7 @@ use crate::project::LoadedProject;
 /// Текст пункта настройки — не выделяется мышью (не текстовое поле), сам
 /// кликабелен (эквивалент клика по чекбоксу/радиокнопке рядом) и слегка
 /// подсвечивается при наведении.
-fn toggle_label(ui: &mut egui::Ui, text: &str) -> bool {
+pub(super) fn toggle_label(ui: &mut egui::Ui, text: &str) -> bool {
     let base  = Color32::from_gray(190);
     let hover = Color32::from_gray(230);
     let galley = ui.painter().layout_no_wrap(
