@@ -5,7 +5,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 pub mod settings;
 pub mod project;
-pub mod project_sort;
 pub mod manifest;
 pub mod routine_scheduler;
 pub mod notify;
@@ -17,8 +16,10 @@ pub mod updater;
 
 // ── File logger (GUI app has no console on Windows) ──────────────────────────
 
+#[cfg(debug_assertions)]
 static LOG_PATH: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 
+#[cfg(debug_assertions)]
 pub fn write_log(msg: &str) {
     let Some(path) = LOG_PATH.get() else { return };
     use std::io::Write;
@@ -30,9 +31,22 @@ pub fn write_log(msg: &str) {
     }
 }
 
+/// Debug-сборка: пишет в debug.log.
+#[cfg(debug_assertions)]
 #[macro_export]
 macro_rules! clog {
     ($($arg:tt)*) => { crate::write_log(&format!($($arg)*)) };
+}
+
+/// Release-сборка (`cargo build -r`): пустышка. Аргументы остаются под
+/// `if false`, чтобы не было warning'ов про unused-переменные, но форматирование
+/// не выполняется, а оптимизатор выкидывает всё целиком.
+#[cfg(not(debug_assertions))]
+#[macro_export]
+macro_rules! clog {
+    ($($arg:tt)*) => {
+        if false { let _ = format!($($arg)*); }
+    };
 }
 
 /// Мост между стандартным `log`-фасадом (через который egui шлёт свои
@@ -40,7 +54,9 @@ macro_rules! clog {
 /// файловым логом (debug.log) — без egui-варнингов было физически некуда
 /// смотреть: GUI-процесс на Windows не имеет консоли, а без установленного
 /// log::Log egui'шные log::warn! просто молча пропадали в никуда.
+#[cfg(debug_assertions)]
 struct FileLogger;
+#[cfg(debug_assertions)]
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         metadata.level() <= log::Level::Warn
@@ -52,6 +68,7 @@ impl log::Log for FileLogger {
     }
     fn flush(&self) {}
 }
+#[cfg(debug_assertions)]
 static FILE_LOGGER: FileLogger = FileLogger;
 
 use eframe::egui::{
@@ -271,13 +288,6 @@ struct App {
     active_project_idx:    usize,
     project_open:          bool,
     project_keyboard_focus:    Option<usize>,
-    /// Порядок показа проектов в свитчере (id, по настройке сортировки).
-    /// Пересчитывается при КАЖДОМ открытии списка и когда меняется набор
-    /// проектов; пока список открыт, а набор тот же — заморожен, чтобы строки
-    /// не прыгали «под рукой» при смене дат изменения. Пуст, пока список
-    /// закрыт. `project_keyboard_focus` — позиция в ЭТОМ порядке, не индекс
-    /// в `projects`.
-    project_display_order:     Vec<String>,
     project_focus_is_keyboard: bool,
     project_focus_bias:        f32,
     project_focus_bias_target: f32,
@@ -394,11 +404,7 @@ impl App {
                         color_hex:  entry.color_hex.clone(),
                         main:       indexmap::IndexMap::new(),
                         subs:       indexmap::IndexMap::new(),
-                        // Даты — из манифеста (для сортировки списка проектов до
-                        // того, как файлы реально прочитаны). У записей старого
-                        // формата тут 0 — просто уедут в конец списка по дате.
-                        created_at:  entry.created_at,
-                        last_edited: entry.last_edited,
+                        created_at: 0, // временная заглушка — см. project.rs, load_active_with_fallback
                         loaded:     false,
                         main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
                         order_key: entry.order_key, order_key_edited_at: 0,
@@ -455,7 +461,6 @@ impl App {
             active_project_idx:    active_idx,
             project_open:          false,
             project_keyboard_focus:    None,
-            project_display_order:     Vec::new(),
             project_focus_is_keyboard: false,
             project_focus_bias:        0.5,
             project_focus_bias_target: 0.5,
@@ -586,7 +591,6 @@ impl App {
             self.projects[idx].subs.shift_remove(task_id.as_str());
             self.projects[idx].main.shift_remove(task_id.as_str());
         }
-        self.projects[idx].touch(done_ts);
         self.projects[idx].save();
     }
 
@@ -609,7 +613,6 @@ impl App {
             routine:    routine.clone(),
         });
         self.projects[idx].apply_set_routine(&task_id, routine, ts);
-        self.projects[idx].touch(ts);
         self.projects[idx].save();
     }
 
@@ -1008,7 +1011,6 @@ impl eframe::App for App {
                             });
                             self.projects[idx].add_task(task_id, text, &s);
                         }
-                        self.projects[idx].touch(project::current_time());
                         self.projects[idx].save();
                         self.compact_if_needed(idx);
                     }
@@ -1144,12 +1146,6 @@ impl eframe::App for App {
                 }
             }
 
-            // Список закрыт — снимок порядка не нужен; следующее открытие
-            // посчитает его заново (там и подхватятся свежие даты).
-            if !self.project_open {
-                self.project_display_order.clear();
-            }
-
             if self.project_open {
                 let dropdown_top_y = bar_rect.min.y + 14.0;
                 // Не self.last_h — это наше СОБСТВЕННОЕ предположение о высоте окна (то,
@@ -1209,26 +1205,6 @@ impl eframe::App for App {
                 let mut delete_project: Option<usize> = None;
                 let mut open_settings              = false;
 
-                // Порядок показа: пересчёт при открытии (снимок пуст) и когда
-                // набор проектов изменился (добавили/удалили/пришёл по синку).
-                // Простое изменение дат при том же наборе порядок НЕ меняет.
-                let order_stale = self.project_display_order.len() != self.projects.len()
-                    || self.project_display_order.iter()
-                        .any(|id| !self.projects.iter().any(|p| &p.id == id));
-                if order_stale {
-                    self.project_display_order =
-                        project_sort::display_order(&self.projects, self.settings.project_sort)
-                            .into_iter()
-                            .map(|i| self.projects[i].id.clone())
-                            .collect();
-                }
-                // Физические индексы в порядке показа. Клик/удаление/Enter
-                // работают с физическим индексом (на нём держится вся остальная
-                // логика), а подсветка клавиатурного фокуса — с позицией.
-                let order_idx: Vec<usize> = self.project_display_order.iter()
-                    .filter_map(|id| self.projects.iter().position(|p| &p.id == id))
-                    .collect();
-
                 // Мышиный режим включает не только движение курсора, но и колесо —
                 // если крутить колесо, не двигая саму мышь, pointer.delta() остаётся
                 // нулевым, а мы должны всё равно уступить приоритет мыши, иначе
@@ -1281,9 +1257,7 @@ impl eframe::App for App {
                 // подсвечено мышью) — и не должен сработать, пока в панели уже открыто
                 // поле добавления/переименования проекта (там Enter — для него).
                 if !project_adding && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    if let Some(&i) = self.project_keyboard_focus
-                        .and_then(|pos| order_idx.get(pos))
-                    {
+                    if let Some(i) = self.project_keyboard_focus {
                         select_project = Some(i);
                     }
                 }
@@ -1364,8 +1338,7 @@ impl eframe::App for App {
                                 scroll_area.show(ui, |ui| {
                                         ui.spacing_mut().item_spacing = vec2(0.0, 1.0);
 
-                                        for (pos, &i) in order_idx.iter().enumerate() {
-                                            let proj = &self.projects[i];
+                                        for (i, proj) in self.projects.iter().enumerate() {
                                             let is_active = self.active_project_idx == i;
 
                                             let (rr, _) = ui.allocate_exact_size(
@@ -1403,7 +1376,7 @@ impl eframe::App for App {
                                             // взаимоисключающие, см. project_focus_is_keyboard
                                             // выше: последний подвигавшийся ввод и выигрывает.
                                             let kb_focused = self.project_focus_is_keyboard
-                                                && self.project_keyboard_focus == Some(pos);
+                                                && self.project_keyboard_focus == Some(i);
                                             let mouse_focused = !self.project_focus_is_keyboard
                                                 && name_resp.hovered();
                                             let label_col = if is_active || kb_focused || mouse_focused {
@@ -1756,7 +1729,6 @@ impl eframe::App for App {
                         project_id, task_id: task_id.clone(),
                     });
                     self.projects[idx].apply_promote_task(&task_id, ts);
-                    self.projects[idx].touch(ts);
                     self.projects[idx].save();
                 }
             }
@@ -2261,7 +2233,6 @@ impl eframe::App for App {
                                     text:       new_text.clone(),
                                 });
                                 self.projects[idx].apply_edit_task(&task_id, &new_text, ts);
-                                self.projects[idx].touch(ts);
                             }
                             self.projects[idx].save();
                         }
@@ -2343,11 +2314,6 @@ impl eframe::App for App {
                                     task_id,
                                     order_key,
                                 });
-                                // Перестановка — действие пользователя: двигаем дату
-                                // изменения и сохраняем (иначе дата и новый порядок
-                                // дошли бы до диска только со следующим save()).
-                                self.projects[idx].touch(ts);
-                                self.projects[idx].save();
                                 // Перетаскивание — единственное, что сужает зазоры
                                 // (середина между соседями): проверяем сразу.
                                 self.compact_if_needed(idx);
@@ -2367,7 +2333,6 @@ impl eframe::App for App {
                         task_id:    task_id.clone(),
                     });
                     self.projects[idx].apply_promote_task(&task_id, ts);
-                    self.projects[idx].touch(ts);
                     self.projects[idx].save();
                 }
             }
@@ -2410,7 +2375,6 @@ impl eframe::App for App {
                         self.sync.tombstones.add_task(&task_id, &project_id, ts, &self.sync.identity.device_id);
                     }
                     self.projects[idx].delete_sub(i);
-                    self.projects[idx].touch(project::current_time());
                 }
                 self.projects[idx].save();
             }
@@ -2454,7 +2418,6 @@ impl eframe::App for App {
                             target,
                         });
                         self.projects[idx].add_task(task_id, text, &s);
-                        self.projects[idx].touch(project::current_time());
                         self.projects[idx].save();
                         self.compact_if_needed(idx);
                     } else {
@@ -2551,14 +2514,16 @@ fn main() -> eframe::Result<()> {
     }
 
     let _ = std::fs::create_dir_all(app_dir());
-    // Init file logger before anything else — GUI apps have no console on Windows.
-    LOG_PATH.set(app_dir().join("debug.log")).ok();
-    // Truncate log on each run so it doesn't grow forever during debugging.
-    let _ = std::fs::write(app_dir().join("debug.log"), "");
-    // Подключаем FileLogger к стандартному log-фасаду — без этого egui
-    // молча глотал бы свои внутренние warn! (в т.ч. "id clash"), и красные
-    // квадраты на экране были бы без единого объяснения, откуда они.
-    let _ = log::set_logger(&FILE_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
+    // Файловый лог — только в debug-сборке; в release ничего не создаётся и не пишется.
+    #[cfg(debug_assertions)]
+    {
+        // Init file logger before anything else — GUI apps have no console on Windows.
+        LOG_PATH.set(app_dir().join("debug.log")).ok();
+        // Truncate log on each run so it doesn't grow forever during debugging.
+        let _ = std::fs::write(app_dir().join("debug.log"), "");
+        // Подключаем FileLogger к стандартному log-фасаду (egui-варнинги, "id clash").
+        let _ = log::set_logger(&FILE_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
+    }
     clog!("=== Cue started ===");
 
     if let Some(lock) = read_lock() {
