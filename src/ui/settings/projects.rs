@@ -1,6 +1,6 @@
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32};
 use crate::settings::{ProjectSort, Settings};
-use super::general::toggle_label;
+use super::general::{first_section_title, toggle_label};
 
 /// Вкладка «Проекты»: сортировка списка проектов. Настройка локальная (не
 /// синкается), применяется при следующем открытии списка проектов.
@@ -10,11 +10,7 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
 
     let mut changed = false;
 
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        ui.label(RichText::new("Сортировка списка проектов:")
-            .color(Color32::from_white_alpha(90)).size(11.0));
-    });
+    first_section_title(ui, "Сортировка списка проектов:");
     ui.add_space(6.0);
 
     let options = [

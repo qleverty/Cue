@@ -2,6 +2,24 @@ use eframe::egui::{self, Color32, RichText};
 use crate::settings::{NewTaskPos, Settings, StartupMode};
 use crate::project::LoadedProject;
 
+/// Размер текста заголовков блоков («При запуске:», «Сортировка списка
+/// проектов:» и т.п.) — как у «Это устройство» на вкладке «Синхронизация».
+pub(super) const SECTION_TITLE_SIZE: f32 = 10.0;
+
+/// Заголовок блока, стоящий САМЫМ ВЕРХНИМ под полоской вкладок. Строка
+/// остаётся высотой в `interact_size.y` (как обычная `ui.horizontal`, чтобы
+/// всё ниже не сдвигалось), но текст прижат к её верху, а не центрирован, —
+/// иначе он оказывается на пару пикселей ниже, чем «Это устройство» на
+/// вкладке «Синхронизация» (там подпись лежит прямо в вертикальной раскладке).
+pub(super) fn first_section_title(ui: &mut egui::Ui, text: &str) {
+    ui.horizontal_top(|ui| {
+        ui.set_min_height(ui.spacing().interact_size.y);
+        ui.add_space(14.0);
+        ui.label(RichText::new(text)
+            .color(Color32::from_white_alpha(90)).size(SECTION_TITLE_SIZE));
+    });
+}
+
 /// Текст пункта настройки — не выделяется мышью (не текстовое поле), сам
 /// кликабелен (эквивалент клика по чекбоксу/радиокнопке рядом) и слегка
 /// подсвечивается при наведении.
@@ -27,11 +45,7 @@ pub fn draw(
 
     let mut changed = false;
 
-    ui.horizontal(|ui| {
-        ui.add_space(14.0);
-        ui.label(RichText::new("При создании новых задач:")
-            .color(Color32::from_white_alpha(90)).size(11.0));
-    });
+    first_section_title(ui, "При создании новых задач:");
     ui.add_space(6.0);
 
     ui.horizontal(|ui| {
@@ -92,7 +106,7 @@ pub fn draw(
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         ui.label(RichText::new("При запуске:")
-            .color(Color32::from_white_alpha(90)).size(11.0));
+            .color(Color32::from_white_alpha(90)).size(SECTION_TITLE_SIZE));
     });
     ui.add_space(6.0);
 
@@ -128,7 +142,7 @@ pub fn draw(
     ui.horizontal(|ui| {
         ui.add_space(14.0);
         ui.label(RichText::new("Прочее:")
-            .color(Color32::from_white_alpha(90)).size(11.0));
+            .color(Color32::from_white_alpha(90)).size(SECTION_TITLE_SIZE));
     });
     ui.add_space(6.0);
 
