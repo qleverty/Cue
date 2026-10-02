@@ -37,7 +37,7 @@ struct DiscoveryMsg {
 
 pub type DiscoveredList = Arc<Mutex<Vec<DiscoveredPeer>>>;
 
-pub const UDP_PORT: u16      = 52683;
+pub const UDP_PORT: u16      = 24683;
 const PEER_TTL:     u64      = 10;
 const READ_TIMEOUT: Duration = Duration::from_millis(250);
 /// Один UDP-broadcast легко теряется (Wi-Fi power-save, ARP, фаервол в момент

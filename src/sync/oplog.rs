@@ -66,6 +66,16 @@ pub enum OpKind {
     /// LoadedProject::apply_compact_order.
     #[serde(rename = "COMPACT_ORDER")]
     CompactOrder   { project_id: String, order: Vec<String> },
+    /// Перенумерация order_key ВСЕХ известных отправителю проектов одним
+    /// опом — когда зазоры между ключами проектов стали слишком узкими (или
+    /// ключи равны). Образец — CompactOrder у задач: `order` — id проектов в
+    /// итоговом порядке, i-й получает ключ `i * 1000`; ранги считаются по
+    /// всему списку, включая неизвестные получателю id. ГЛОБАЛЬНЫЙ оп: у
+    /// него нет project_id (как у SetSharedSetting), поэтому "узкий фикс"
+    /// заглушек в main.rs его не покрывает — там отдельная проверка.
+    /// См. project::apply_compact_projects_order.
+    #[serde(rename = "COMPACT_PROJECTS_ORDER")]
+    CompactProjectsOrder { order: Vec<String> },
     /// Полная перезапись расписания задачи. `routine: None` — убрать
     /// рутину целиком (задача остаётся обычной). Без диффов.
     #[serde(rename = "SET_ROUTINE")]
@@ -102,8 +112,9 @@ pub enum OpKind {
 
 impl OpKind {
     /// project_id этого опа, если он вообще про конкретный проект.
-    /// None — только для SetSharedSetting (глобальная настройка, не
-    /// привязана к проекту). Используется в main.rs перед apply_op, чтобы
+    /// None — только для глобальных опов: SetSharedSetting (настройка) и
+    /// CompactProjectsOrder (порядок всех проектов), не привязаны к одному
+    /// проекту. Используется в main.rs перед apply_op, чтобы
     /// узнать, чей проект нужно (при необходимости) синхронно догрузить —
     /// см. "узкий фикс" в обсуждении: заглушка (loaded: false) не должна
     /// получать оп поверх пустых main/subs.
@@ -123,6 +134,7 @@ impl OpKind {
             OpKind::CompactOrder   { project_id, .. } => Some(project_id),
             OpKind::SetRoutine     { project_id, .. } => Some(project_id),
             OpKind::TransferTask   { from_project_id, .. } => Some(from_project_id),
+            OpKind::CompactProjectsOrder { .. }       => None,
             OpKind::SetSharedSetting { .. }           => None,
         }
     }
@@ -211,6 +223,7 @@ impl OpLog {
             OpKind::EditTask       { .. } => "EDIT_TASK",
             OpKind::MoveTask       { .. } => "MOVE_TASK",
             OpKind::CompactOrder   { .. } => "COMPACT_ORDER",
+            OpKind::CompactProjectsOrder { .. } => "COMPACT_PROJECTS_ORDER",
             OpKind::SetRoutine     { .. } => "SET_ROUTINE",
             OpKind::TransferTask   { .. } => "TRANSFER_TASK",
             OpKind::SetSharedSetting{..}  => "SET_SHARED_SETTING",
@@ -248,4 +261,25 @@ impl OpLog {
 
     /// All ops, for replay / compaction.
     pub fn all_ops(&self) -> Vec<Op> { self.ops_since(1) }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_projects_order_roundtrips_and_is_global() {
+        let op = Op {
+            op_id: "o".into(), device_id: "d".into(), seq: 1, ts: 5,
+            kind: OpKind::CompactProjectsOrder { order: vec!["a".into(), "b".into()] },
+        };
+        let line = serde_json::to_string(&op).unwrap();
+        assert!(line.contains("COMPACT_PROJECTS_ORDER"), "{line}");
+        let back: Op = serde_json::from_str(&line).unwrap();
+        match back.kind {
+            OpKind::CompactProjectsOrder { order } => assert_eq!(order, vec!["a", "b"]),
+            _ => panic!("не тот вид опа"),
+        }
+        assert!(op.kind.project_id().is_none());
+        assert!(op.kind.task_id().is_none());
+    }
 }

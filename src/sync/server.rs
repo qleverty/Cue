@@ -11,7 +11,7 @@ use tiny_http::{Method, Request, Response, Server, StatusCode};
 
 use super::{oplog::Op, peers::Peers, DeviceType, OplogState};
 
-pub const DEFAULT_PORT: u16 = 52684;
+pub const DEFAULT_PORT: u16 = 24684;
 pub const PROTO_VER: u32 = 1;
 
 /// Для `#[serde(default = "...")]` полей "порт HTTP-сервера пира": у записей и

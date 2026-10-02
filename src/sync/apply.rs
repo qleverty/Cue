@@ -203,6 +203,17 @@ fn apply_op_inner(
             if !projects[idx].apply_move_task(task_id, *order_key, op.ts) { return Vec::new(); }
             vec![real_id]
         }
+        // Глобальный оп (project_id нет). Удалённых проектов в `projects`
+        // уже нет — они пропустятся как неизвестные id. В counts_as_edit
+        // НЕ входит: порядок списка — не правка содержимого проекта.
+        OpKind::CompactProjectsOrder { order } => {
+            let changed = crate::project::apply_compact_projects_order(projects, order, op.ts);
+            crate::clog!(
+                "[apply] COMPACT_PROJECTS_ORDER listed={} changed={}",
+                order.len(), changed.len()
+            );
+            changed
+        }
         OpKind::CompactOrder { project_id, order } => {
             if tombstones.deleted_at(project_id).is_some() { return Vec::new(); }
             let Some(p) = projects.iter_mut().find(|p| &p.id == project_id) else { return Vec::new(); };
@@ -392,5 +403,123 @@ mod touch_tests {
         let dirty = apply_op(&op(1, 999, kind), &mut projects, &mut tombs, &mut settings, &mut seen);
         assert!(dirty.is_empty());
         assert_eq!(projects[0].last_edited, 100);
+    }
+}
+
+#[cfg(test)]
+mod compact_projects_tests {
+    use super::*;
+    use eframe::egui::Color32;
+
+    fn proj(id: &str) -> LoadedProject {
+        LoadedProject::new(id.into(), id.into(), Color32::WHITE, 100)
+    }
+    fn op(n: u32, ts: u64, kind: OpKind) -> Op {
+        Op { op_id: format!("op{n}"), device_id: "dev".into(), seq: n as u64, ts, kind }
+    }
+    fn compact(n: u32, ts: u64, ids: &[&str]) -> Op {
+        op(n, ts, OpKind::CompactProjectsOrder { order: ids.iter().map(|s| s.to_string()).collect() })
+    }
+    fn mv(n: u32, ts: u64, id: &str, key: f64) -> Op {
+        op(n, ts, OpKind::MoveProject { project_id: id.into(), order_key: key })
+    }
+
+    /// Применяет опы в заданном порядке к свежему набору p0..p2 (все ключи
+    /// 0.0, метки 0 — как у существующих проектов) и возвращает
+    /// (ключи, метки, last_edited) по id.
+    fn run(ops: &[&Op]) -> Vec<(f64, u64, u64)> {
+        let mut projects = vec![proj("p0"), proj("p1"), proj("p2")];
+        let mut tombs = Tombstones::load(std::path::Path::new("/nonexistent-cue-test-dir"));
+        let mut settings = Settings::default();
+        let mut seen = HashSet::new();
+        for o in ops {
+            apply_op(o, &mut projects, &mut tombs, &mut settings, &mut seen);
+        }
+        projects.iter().map(|p| (p.order_key, p.order_key_edited_at, p.last_edited)).collect()
+    }
+
+    fn permutations<T: Clone>(v: &[T]) -> Vec<Vec<T>> {
+        if v.len() <= 1 { return vec![v.to_vec()]; }
+        let mut out = Vec::new();
+        for i in 0..v.len() {
+            let mut rest = v.to_vec();
+            let x = rest.remove(i);
+            for mut p in permutations(&rest) { p.insert(0, x.clone()); out.push(p); }
+        }
+        out
+    }
+
+    #[test]
+    fn returns_changed_ids_and_does_not_touch_last_edited() {
+        let mut projects = vec![proj("p0"), proj("p1")];
+        let mut tombs = Tombstones::load(std::path::Path::new("/nonexistent-cue-test-dir"));
+        let mut settings = Settings::default();
+        let mut seen = HashSet::new();
+        let dirty = apply_op(&compact(1, 900, &["p1", "p0"]), &mut projects, &mut tombs, &mut settings, &mut seen);
+        assert_eq!(dirty, vec!["p1".to_string(), "p0".to_string()]);
+        assert_eq!(projects[0].last_edited, 100);
+        assert_eq!(projects[1].last_edited, 100);
+        assert_eq!((projects[1].order_key, projects[0].order_key), (0.0, 1000.0));
+    }
+
+    #[test]
+    fn unknown_and_deleted_projects_do_not_panic() {
+        let mut projects = vec![proj("p0")];
+        let mut tombs = Tombstones::load(std::path::Path::new("/nonexistent-cue-test-dir"));
+        let mut settings = Settings::default();
+        let mut seen = HashSet::new();
+        // Список целиком из неизвестных id (в т.ч. удалённого — его в projects нет).
+        let dirty = apply_op(&compact(1, 5, &["gone", "ghost"]), &mut projects, &mut tombs, &mut settings, &mut seen);
+        assert!(dirty.is_empty());
+        let dirty = apply_op(&compact(2, 5, &[]), &mut projects, &mut tombs, &mut settings, &mut seen);
+        assert!(dirty.is_empty());
+        assert_eq!(projects[0].order_key_edited_at, 0);
+    }
+
+    #[test]
+    fn repeated_op_is_idempotent() {
+        let mut projects = vec![proj("p0"), proj("p1")];
+        let mut tombs = Tombstones::load(std::path::Path::new("/nonexistent-cue-test-dir"));
+        let mut settings = Settings::default();
+        let mut seen = HashSet::new();
+        let o = compact(1, 10, &["p1", "p0"]);
+        assert!(!apply_op(&o, &mut projects, &mut tombs, &mut settings, &mut seen).is_empty());
+        assert!(apply_op(&o, &mut projects, &mut tombs, &mut settings, &mut seen).is_empty());
+    }
+
+    /// Любой порядок прихода MoveProject + CompactProjectsOrder даёт одни и
+    /// те же ключи и метки — для ts компакции раньше, равного и позже ts
+    /// перетаскивания (равный — приём "один ts на перетаскивание и
+    /// компакцию").
+    #[test]
+    fn move_and_compact_converge_in_any_order() {
+        for compact_ts in [10u64, 20, 30] {
+            let mv_op = mv(1, 20, "p2", 500.0);
+            let c_op  = compact(2, compact_ts, &["p0", "p2", "p1"]);
+            let mut results = Vec::new();
+            for perm in permutations(&[&mv_op, &c_op]) {
+                results.push(run(&perm));
+            }
+            assert_eq!(results[0], results[1], "compact_ts={compact_ts}");
+        }
+        // Конкретика для равного ts: компакция выигрывает у перетащенного ключа.
+        let r = run(&[&mv(1, 20, "p2", 500.0), &compact(2, 20, &["p0", "p2", "p1"])]);
+        assert_eq!((r[0].0, r[2].0, r[1].0), (0.0, 1000.0, 2000.0));
+    }
+
+    #[test]
+    fn two_concurrent_compactions_converge() {
+        let a = compact(1, 10, &["p0", "p1", "p2"]);
+        let b = compact(2, 20, &["p2", "p1", "p0"]);
+        let c = compact(3, 20, &["p2", "p1", "p0"]); // та же компакция с другого устройства
+        let base = run(&[&a, &b, &c]);
+        for perm in permutations(&[&a, &b, &c]) {
+            assert_eq!(run(&perm), base);
+        }
+    }
+
+    #[test]
+    fn compact_projects_order_does_not_count_as_edit() {
+        assert!(!counts_as_edit(&OpKind::CompactProjectsOrder { order: vec![] }));
     }
 }

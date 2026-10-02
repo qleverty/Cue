@@ -2,7 +2,7 @@ use tiny_http::{Method, Response, Server, StatusCode};
 
 use crate::exclusive_bind::bind_exclusive;
 
-pub const PORT: u16 = 52684;
+pub const PORT: u16 = 24684;
 
 pub fn start() {
     std::thread::Builder::new()

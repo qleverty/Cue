@@ -480,6 +480,7 @@ impl LoadedProject {
             task_count:         self.task_count,
             has_active_routine: self.has_active_routine(),
             order_key:          self.order_key,
+            order_key_edited_at: self.order_key_edited_at,
             created_at:         self.created_at,
             last_edited:        self.last_edited,
         });
@@ -816,6 +817,51 @@ pub fn create_default_project() -> LoadedProject {
     proj
 }
 
+/// Перенумерация order_key ПРОЕКТОВ одним опом (см.
+/// OpKind::CompactProjectsOrder) — приёмная сторона по образцу
+/// `LoadedProject::apply_compact_order` у задач. Проект `order[i]` получает
+/// ключ `i * COMPACT_STEP`; ранги считаются по ВСЕМУ списку отправителя,
+/// включая id, которых у нас нет (не долетели/удалены) — их пропускаем, но
+/// ранг они не сдвигают. Проекты, которых нет в списке, не трогаем.
+///
+/// LWW по каждому проекту: пропускаем, только если метка СТРОГО новее
+/// (`ts < order_key_edited_at`) — проект двигали после этой компакции.
+/// Равенство проходит сознательно (перетаскивание и компакция сразу за ним
+/// делят один ts, см. apply_compact_order). Метку не понижаем (`max`).
+///
+/// Физический порядок `projects` НЕ меняем: на его индексах держатся
+/// active_project_idx, клавиатурный фокус и т.п. Порядок показа считается
+/// сортировкой при показе. Повторяющийся id в `order`: учитывается первое
+/// вхождение (его ранг), остальные пропускаются — иначе итог зависел бы от
+/// того, какой дубль применился последним.
+///
+/// Заглушки (`loaded == false`) сюда передавать нельзя — у них метка
+/// ненастоящая; main.rs откладывает оп, пока заглушки есть.
+///
+/// Возвращает id проектов, у которых изменился ключ ИЛИ метка (метка важна
+/// для LWW, даже если число совпало) — вызывающий код сохранит их.
+pub fn apply_compact_projects_order(
+    projects: &mut [LoadedProject],
+    order:    &[String],
+    ts:       u64,
+) -> Vec<String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut changed = Vec::new();
+    for (rank, id) in order.iter().enumerate() {
+        if !seen.insert(id.as_str()) { continue; }
+        let Some(p) = projects.iter_mut().find(|p| &p.id == id) else { continue; };
+        if ts < p.order_key_edited_at { continue; }
+        let new_key   = rank as f64 * COMPACT_STEP;
+        let new_stamp = p.order_key_edited_at.max(ts);
+        if p.order_key != new_key || p.order_key_edited_at != new_stamp {
+            changed.push(id.clone());
+        }
+        p.order_key           = new_key;
+        p.order_key_edited_at = new_stamp;
+    }
+    changed
+}
+
 #[cfg(test)]
 mod compact_tests {
     use super::*;
@@ -999,5 +1045,99 @@ mod compact_tests {
         recv.apply_compact_order(&list, 10);
         assert_eq!(recv.subs["d"].order_key, sender.subs["d"].order_key);
         assert_eq!(recv.subs["b"].order_key, sender.subs["b"].order_key);
+    }
+}
+
+#[cfg(test)]
+mod compact_projects_tests {
+    use super::*;
+
+    /// Проект (id, ключ, метка).
+    fn pr(id: &str, key: f64, stamp: u64) -> LoadedProject {
+        let mut p = LoadedProject::new(id.into(), id.into(), Color32::WHITE, 0);
+        p.order_key = key;
+        p.order_key_edited_at = stamp;
+        p
+    }
+    fn ord(ids: &[&str]) -> Vec<String> { ids.iter().map(|s| s.to_string()).collect() }
+    fn key_of(ps: &[LoadedProject], id: &str) -> f64 { ps.iter().find(|p| p.id == id).unwrap().order_key }
+    fn stamp_of(ps: &[LoadedProject], id: &str) -> u64 { ps.iter().find(|p| p.id == id).unwrap().order_key_edited_at }
+    fn ids(ps: &[LoadedProject]) -> Vec<&str> { ps.iter().map(|p| p.id.as_str()).collect() }
+
+    #[test]
+    fn ranks_follow_list_order() {
+        let mut ps = vec![pr("a", 0.0, 0), pr("b", 0.0, 0), pr("c", 0.0, 0)];
+        let changed = apply_compact_projects_order(&mut ps, &ord(&["c", "a", "b"]), 10);
+        assert_eq!((key_of(&ps, "c"), key_of(&ps, "a"), key_of(&ps, "b")), (0.0, 1000.0, 2000.0));
+        assert_eq!(stamp_of(&ps, "a"), 10);
+        assert_eq!(changed.len(), 3);
+    }
+
+    #[test]
+    fn unknown_ids_do_not_shift_ranks() {
+        let mut ps = vec![pr("a", 5.0, 0), pr("c", 5.0, 0)];
+        apply_compact_projects_order(&mut ps, &ord(&["a", "ghost", "c"]), 10);
+        assert_eq!(key_of(&ps, "a"), 0.0);
+        assert_eq!(key_of(&ps, "c"), 2000.0); // ранг 2, а не 1
+    }
+
+    #[test]
+    fn projects_not_in_list_are_untouched() {
+        let mut ps = vec![pr("a", 7.0, 3), pr("extra", 7777.0, 3)];
+        let changed = apply_compact_projects_order(&mut ps, &ord(&["a"]), 10);
+        assert_eq!((key_of(&ps, "extra"), stamp_of(&ps, "extra")), (7777.0, 3));
+        assert_eq!(changed, ord(&["a"]));
+    }
+
+    #[test]
+    fn stale_stamp_skipped_equal_passes() {
+        let mut ps = vec![pr("new", 42.0, 50), pr("eq", 42.0, 10), pr("old", 42.0, 5)];
+        apply_compact_projects_order(&mut ps, &ord(&["new", "eq", "old"]), 10);
+        assert_eq!((key_of(&ps, "new"), stamp_of(&ps, "new")), (42.0, 50)); // метка новее — пропуск
+        assert_eq!((key_of(&ps, "eq"), stamp_of(&ps, "eq")), (1000.0, 10));  // равенство проходит
+        assert_eq!((key_of(&ps, "old"), stamp_of(&ps, "old")), (2000.0, 10));
+    }
+
+    #[test]
+    fn stamp_is_never_lowered() {
+        let mut ps = vec![pr("a", 1.0, 100)];
+        apply_compact_projects_order(&mut ps, &ord(&["a"]), 100);
+        assert_eq!(stamp_of(&ps, "a"), 100);
+        // Запоздавшая компакция (ts < метки) не трогает ни ключ, ни метку.
+        apply_compact_projects_order(&mut ps, &ord(&["x", "a"]), 50);
+        assert_eq!((key_of(&ps, "a"), stamp_of(&ps, "a")), (0.0, 100));
+    }
+
+    #[test]
+    fn returns_only_changed_ids() {
+        // "a": тот же ключ и метка (не изменился); "b": тот же ключ, метка
+        // выросла (изменился — метка важна); "c": ключ другой.
+        let mut ps = vec![pr("a", 0.0, 10), pr("b", 1000.0, 5), pr("c", 9.0, 10)];
+        let changed = apply_compact_projects_order(&mut ps, &ord(&["a", "b", "c"]), 10);
+        assert_eq!(changed, ord(&["b", "c"]));
+    }
+
+    #[test]
+    fn physical_order_is_not_changed() {
+        let mut ps = vec![pr("a", 0.0, 0), pr("b", 0.0, 0), pr("c", 0.0, 0)];
+        apply_compact_projects_order(&mut ps, &ord(&["c", "b", "a"]), 10);
+        assert_eq!(ids(&ps), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn duplicate_id_first_occurrence_wins() {
+        let mut ps = vec![pr("a", 0.0, 0), pr("b", 0.0, 0)];
+        let changed = apply_compact_projects_order(&mut ps, &ord(&["a", "b", "a"]), 10);
+        assert_eq!((key_of(&ps, "a"), key_of(&ps, "b")), (0.0, 1000.0));
+        assert_eq!(changed.iter().filter(|i| *i == "a").count(), 1); // в результате не дублируется
+    }
+
+    #[test]
+    fn empty_inputs_do_not_panic() {
+        let mut none: Vec<LoadedProject> = vec![];
+        assert!(apply_compact_projects_order(&mut none, &ord(&["a"]), 1).is_empty());
+        let mut ps = vec![pr("a", 1.0, 0)];
+        assert!(apply_compact_projects_order(&mut ps, &[], 1).is_empty());
+        assert_eq!(key_of(&ps, "a"), 1.0);
     }
 }

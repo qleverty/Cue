@@ -401,7 +401,7 @@ impl App {
                         last_edited: entry.last_edited,
                         loaded:     false,
                         main_edited_at: 0, name_edited_at: 0, color_edited_at: 0,
-                        order_key: entry.order_key, order_key_edited_at: 0,
+                        order_key: entry.order_key, order_key_edited_at: entry.order_key_edited_at,
                         task_count: entry.task_count,
                     }
                 })
@@ -792,6 +792,22 @@ impl eframe::App for App {
                                 }
                             }
                         }
+                    }
+
+                    // CompactProjectsOrder — глобальный оп (project_id() ==
+                    // None), узкий фикс выше его не покрывает. Он меняет
+                    // order_key/метку у многих проектов сразу, а у заглушек
+                    // метка ненастоящая (LWW на них проверять нельзя), и
+                    // последующий save() записал бы пустой проект поверх
+                    // файла. Поэтому пока заглушки есть — откладываем оп; он
+                    // применится после прихода батча (drain ниже). seen_ops
+                    // не трогаем: apply_op добавит op_id при реальном
+                    // применении.
+                    if matches!(op.kind, sync::oplog::OpKind::CompactProjectsOrder { .. })
+                        && self.projects.iter().any(|p| !p.loaded)
+                    {
+                        self.pending_ops.push(op.clone());
+                        continue;
                     }
 
                     // Пер-таск опы теперь не считают project_id() авторитетным

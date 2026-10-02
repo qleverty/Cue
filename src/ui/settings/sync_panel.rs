@@ -230,7 +230,7 @@ fn draw_this_device(
                 );
                 if port_resp.changed() { state.port_dirty = true; }
                 state.port_buf.retain(|c| c.is_ascii_digit());
-                port_resp.clone().on_hover_text("Стандартный: 52684");
+                port_resp.clone().on_hover_text("Стандартный: 24684");
                 if port_resp.lost_focus() {
                     if let Ok(p) = state.port_buf.parse::<u16>() {
                         if p >= PORT_MIN && p != discovery::UDP_PORT && p != our_port {
