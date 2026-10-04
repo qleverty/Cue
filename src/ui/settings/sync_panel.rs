@@ -93,6 +93,9 @@ pub fn draw(
     sync:  &mut SyncHandle,
     settings: &mut crate::settings::Settings,
 ) -> bool {
+    // Время в статусах ("5м назад") должно тикать без движения мыши — движок
+    // опрашивает пиров раз в 30 с, столько же и между перерисовками.
+    ui.ctx().request_repaint_after(std::time::Duration::from_secs(30));
     if !state.name_initialized {
         state.device_name_buf = sync.identity.device_name.clone();
         state.name_initialized = true;
@@ -456,15 +459,20 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Три видимых состояния (цвет самого статус-текста — точку убрали):
-/// - revoked (403 от пира)            → красный, "Отвязано"
-/// - online (последний пул успешен)   → зелёный, время последнего синка
-/// - всё остальное (offline/error/ещё не опрашивали) → серый, "Оффлайн" или
-///   "Ожидание…" (только для свежепривязанного устройства, синка ещё не
-///   было — единственный случай, когда текст в сером состоянии отличается).
-/// status.error намеренно не проверяем отдельно — свежий обрыв соединения
-/// визуально неотличим от простого оффлайна, пользователю эта разница не
-/// нужна (см. обсуждение).
+/// Состояния статус-текста (цвет текста; точку убрали). Приоритет сверху вниз:
+/// - revoked (403 от пира)          → красный, "Отвязано" (поверх несовместимости
+///   — для пользователя это важнее: его оторвали)
+/// - incompatible (/hello ответил, версия не подходит) → оранжевый, "Несовместимо"
+/// - online (последний опрос успешен) → зелёный, "Онлайн (время)"
+/// - иначе → серый, "Оффлайн (время)"; "Ожидание…" — только у свежепривязанного
+///   устройства, синка ещё не было.
+/// Время — сколько прошло с последнего ответа пира (`last_synced_at`, пишется
+/// в trusted_peers.json, переживает перезапуск). В онлайне опрос идёт каждые
+/// 30 с, поэтому там почти всегда "только что": если оно перестало мигать —
+/// пир не пропадал. status.error отдельно не проверяем — свежий обрыв
+/// неотличим от обычного оффлайна, пользователю эта разница не нужна.
+/// Состояния revoked/incompatible берутся из памяти, которая при старте
+/// заполняется из файла — до первого опроса показывается последнее известное.
 fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
     if status.revoked {
         return (ERROR_RED, "Отвязано".to_owned());
@@ -477,30 +485,38 @@ fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
         return (Color32::from_rgb(217, 119, 6), "Несовместимо".to_owned());
     }
     if status.online {
-        // "online, но ни разу не синхронизировались" физически недостижимо —
-        // engine.rs выставляет online и last_synced_at всегда вместе — но
-        // .unwrap_or_else оставляем как защитный fallback, а не unwrap().
-        let text = peer.last_synced_at
-            .map(format_ago)
-            .unwrap_or_else(|| "ожидание…".to_owned());
+        // "online, но ни разу не отвечал" физически недостижимо (engine
+        // выставляет online и пишет время вместе), fallback — защитный.
+        let text = match peer.last_synced_at {
+            Some(ts) => format!("Онлайн ({})", format_ago(ts)),
+            None     => "Онлайн".to_owned(),
+        };
         return (Color32::from_rgb(34, 197, 94), text);
     }
     let text = match peer.last_synced_at {
-        Some(_) => "Оффлайн".to_owned(),
-        None    => "Ожидание…".to_owned(),
+        Some(ts) => format!("Оффлайн ({})", format_ago(ts)),
+        None     => "Ожидание…".to_owned(),
     };
     (Color32::from_white_alpha(90), text)
 }
 
 fn format_ago(ts: u64) -> String {
-    let now  = crate::project::current_time();
-    let diff = now.saturating_sub(ts);
-    match diff {
-        0..=59       => "только что".to_owned(),
-        60..=3599    => format!("{} мин назад",  diff / 60),
-        3600..=86399 => format!("{} ч назад",    diff / 3600),
-        _            => format!("{} дн назад",   diff / 86400),
+    ago_text(crate::project::current_time().saturating_sub(ts))
+}
+
+/// "только что" (< 1 мин), дальше — только ненулевые д/ч/м, старшая слева:
+/// "1д, 2ч, 3м назад", "1ч, 2м назад", "1м назад". Секунды отбрасываются,
+/// недель и месяцев нет.
+fn ago_text(diff: u64) -> String {
+    if diff < 60 {
+        return "только что".to_owned();
     }
+    let (d, h, m) = (diff / 86_400, diff % 86_400 / 3_600, diff % 3_600 / 60);
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if d > 0 { parts.push(format!("{d}д")); }
+    if h > 0 { parts.push(format!("{h}ч")); }
+    if m > 0 { parts.push(format!("{m}м")); }
+    format!("{} назад", parts.join(", "))
 }
 
 fn sep(ui: &mut egui::Ui) {
@@ -637,4 +653,49 @@ fn apply_port(sync: &mut SyncHandle, settings: &mut crate::settings::Settings, p
     settings.http_port = port;
     settings.save();
     sync.shared.set_port(port);
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ago_text_formats() {
+        assert_eq!(ago_text(0), "только что");
+        assert_eq!(ago_text(59), "только что");
+        assert_eq!(ago_text(60), "1м назад");
+        assert_eq!(ago_text(59 * 60 + 59), "59м назад");
+        assert_eq!(ago_text(3_600), "1ч назад");
+        assert_eq!(ago_text(3_600 + 60), "1ч, 1м назад");
+        assert_eq!(ago_text(2 * 3_600 + 5 * 60), "2ч, 5м назад");
+        assert_eq!(ago_text(86_400), "1д назад");
+        assert_eq!(ago_text(86_400 + 300), "1д, 5м назад");           // нулевые единицы пропускаются
+        assert_eq!(ago_text(86_400 + 2 * 3_600 + 3 * 60), "1д, 2ч, 3м назад");
+        assert_eq!(ago_text(120 * 86_400), "120д назад");               // недель/месяцев нет
+        assert_eq!(ago_text(12 * 86_400 + 23 * 3_600 + 59 * 60 + 59), "12д, 23ч, 59м назад");
+    }
+
+    fn peer(ts: Option<u64>) -> PeerEntry {
+        PeerEntry {
+            device_id: "a".into(), device_name: "n".into(), token: "t".into(),
+            ip_hint: None, port: 1, last_synced_at: ts, revoked: false,
+            incompatible: false, device_type: Default::default(),
+        }
+    }
+    fn st(online: bool, revoked: bool, incompatible: bool) -> PeerStatus {
+        PeerStatus { online, error: false, revoked, incompatible }
+    }
+
+    #[test]
+    fn display_priority_and_texts() {
+        let now = crate::project::current_time();
+        // отвязано важнее несовместимости и онлайна
+        assert_eq!(peer_display(&peer(Some(now)), &st(true, true, true)).1, "Отвязано");
+        assert_eq!(peer_display(&peer(Some(now)), &st(false, false, true)).1, "Несовместимо");
+        assert_eq!(peer_display(&peer(Some(now)), &st(true, false, false)).1, "Онлайн (только что)");
+        assert_eq!(peer_display(&peer(Some(now - 180)), &st(false, false, false)).1, "Оффлайн (3м назад)");
+        assert_eq!(peer_display(&peer(None), &st(false, false, false)).1, "Ожидание…");
+        assert_eq!(peer_display(&peer(None), &st(true, false, false)).1, "Онлайн");
+    }
 }

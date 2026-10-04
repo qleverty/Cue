@@ -59,6 +59,18 @@ pub struct Discovery {
 }
 
 impl Discovery {
+    /// Заглушка для тестов движка: пустой список, сокет "готов", пинги в никуда.
+    #[cfg(test)]
+    pub fn for_test() -> Self {
+        let (ping_tx, _rx) = mpsc::sync_channel(1);
+        Self {
+            discovered: Arc::new(Mutex::new(Vec::new())),
+            ready:      Arc::new(Mutex::new(true)),
+            bind_error: Arc::new(Mutex::new(None)),
+            ping_tx,
+        }
+    }
+
     pub fn send_ping(&self) {
         self.ping_tx.try_send(()).ok();
     }

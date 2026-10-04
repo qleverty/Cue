@@ -230,6 +230,17 @@ impl SyncHandle {
         );
         crate::clog!("[sync] discovery started");
 
+        // Статусы пиров стартуют из trusted_peers.json (последнее известное
+        // состояние), а не пустыми: иначе до первого опроса вкладка показала бы
+        // "Оффлайн" даже у отвязанных/несовместимых. Первый опрос — сразу при
+        // старте движка (engine::run), он эти значения тут же уточнит.
+        let mut initial_status = SyncStatus::default();
+        for p in peers_loaded.all() {
+            initial_status.peer_statuses.insert(p.device_id.clone(), PeerStatus {
+                online: false, error: false, revoked: p.revoked, incompatible: p.incompatible,
+            });
+        }
+
         let shared = Arc::new(SharedState {
             device_id:        identity.device_id.clone(),
             device_name,
@@ -238,7 +249,7 @@ impl SyncHandle {
             oplog_state:      Mutex::new(oplog_state),
             pending_pairings: Mutex::new(server::load_pending_pairings(&dir)),
             pending_outgoing: Mutex::new(std::collections::HashMap::new()),
-            sync_status:      Mutex::new(SyncStatus::default()),
+            sync_status:      Mutex::new(initial_status),
             discovered,
             ping_tx,
             http_port,

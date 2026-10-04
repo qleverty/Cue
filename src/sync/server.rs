@@ -409,6 +409,8 @@ pub fn accept_pairing(state: &SharedState, req: &PairingRequest) {
         ip_hint:        Some(req.from_ip.clone()),
         port:           req.port,
         last_synced_at: None,
+        revoked:        false,
+        incompatible:   false,
         device_type:    req.device_type,
     });
     clear_pairing_state(state, &req.device_id);
@@ -498,6 +500,8 @@ fn accept_sync(mut req: Request, state: &SharedState) {
         ip_hint:        Some(from_ip),
         port:           b.port,
         last_synced_at: None,
+        revoked:        false,
+        incompatible:   false,
         device_type:    b.device_type,
     };
     state.peers.write().unwrap().add(entry);
