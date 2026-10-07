@@ -34,13 +34,6 @@ impl Default for DatePickerState {
     }
 }
 
-/// "Сегодня" — через local_now() (местное время с поправкой на часовой
-/// пояс, см. routine_scheduler.rs), а не сырой SystemTime::now(). См.
-/// обсуждение 2026-08-05: на сыром UTC пикер глубокой ночью (когда
-/// локальная дата уже перевалила за полночь, а UTC — ещё нет) показывал
-/// "сегодня" вчерашним днём, и DIRECT-рутины сохранялись на сутки раньше
-/// нужного — из-за чего либо мгновенно активировались, либо вовсе не
-/// присылали уведомление (разрыв now/occ вылетал за NOTIFY_WINDOW_SECS).
 fn today() -> (u32, usize, i32) {
     let days = crate::routine_scheduler::local_now() / 86400;
     let (y, m, d) = crate::routine_scheduler::civil_from_days(days as i64);

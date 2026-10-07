@@ -5,8 +5,6 @@ const DAY_FULL:  [&str; 7] = [
     "Понедельник", "Вторник",  "Среда",
     "Четверг",     "Пятница",  "Суббота", "Воскресенье",
 ];
-/// Коды дней в строках модели ("<code> HH:MM"), порядок совпадает с
-/// DAY_SHORT/DAY_FULL/selected_days: 0=Пн...6=Вс.
 pub const DAY_CODE: [&str; 7] = ["mo", "tu", "we", "th", "fr", "sa", "su"];
 
 pub struct WeekState {

@@ -1,29 +1,4 @@
-// Модуль планировщика рутин.
-//
-// ВАЖНО ПРО МОДУЛЬНОСТЬ (см. Cue_Daemon_Design.txt и раздел 10 плана):
-// весь этот файл — чистые функции без egui/eframe зависимостей. Его можно
-// переиспользовать в будущем cue_daemon без изменений.
-//
-// Все временные расчёты в этом модуле ведутся в unix-секундах (см. local_now()
-// ниже — сейчас это просто current_time(), без поправки на часовой пояс,
-// осознанный компромисс без внешних зависимостей, см. комментарий там же).
-
 use crate::project::Routine;
-
-// ---------------------------------------------------------------------
-// Локальное время (единственное место в модуле, зависящее от ОС)
-// ---------------------------------------------------------------------
-
-// ---------------------------------------------------------------------
-// "Локальное" время
-// ---------------------------------------------------------------------
-// Смещение локали от UTC получаем через сырой FFI прямо на kernel32.dll
-// (GetLocalTime/GetSystemTime) — БЕЗ добавления крейта windows-sys/chrono
-// в Cargo.toml: kernel32 и так линкуется в любую Windows-программу (сам
-// std его использует), поэтому extern-блок ничего не добавляет в
-// зависимости. Разница между "локальным" и "системным" (UTC) прочтением
-// одного и того же момента даёт нужный офсет, автоматически учитывающий
-// переход на летнее время.
 #[cfg(windows)]
 #[allow(non_snake_case, non_camel_case_types)]
 mod win_time {
@@ -58,22 +33,10 @@ fn local_offset_secs() -> i64 {
 #[cfg(not(windows))]
 fn local_offset_secs() -> i64 { 0 }
 
-/// "Сейчас", с поправкой на локальный часовой пояс устройства (см. пояснение
-/// сверху). На не-Windows платформах — падаем обратно на чистый UTC
-/// (current_time()), без офсета — этого пока достаточно, т.к. проект
-/// Windows-ориентирован.
 pub fn local_now() -> u64 {
     (crate::project::current_time() as i64 + local_offset_secs()).max(0) as u64
 }
 
-// ---------------------------------------------------------------------
-// Календарная математика (чистые функции, без ОС-зависимостей)
-// ---------------------------------------------------------------------
-
-/// Дни от 1970-01-01 → (год, месяц 1..=12, день 1..=31). Алгоритм Hinnant.
-/// pub(crate) — переиспользуется в ui/routine/date_picker.rs (см.
-/// обсуждение 2026-08-05: там раньше жила отдельная копия этой же функции,
-/// вместе с тем самым багом "сырой UTC вместо локального времени").
 pub(crate) fn civil_from_days(z: i64) -> (i32, u32, u32) {
     let z = z + 719468;
     let era = if z >= 0 { z } else { z - 146096 } / 146097;
@@ -88,7 +51,6 @@ pub(crate) fn civil_from_days(z: i64) -> (i32, u32, u32) {
     (y as i32, m, d)
 }
 
-/// Обратная функция: (год, месяц 1..=12, день) → дни от 1970-01-01.
 fn days_from_civil(y: i32, m: u32, d: u32) -> i64 {
     let y = (if m <= 2 { y - 1 } else { y }) as i64;
     let era = if y >= 0 { y } else { y - 399 } / 400;
@@ -105,7 +67,6 @@ fn days_in_month(month: u32, year: i32) -> u32 {
     else { DAYS[(month - 1) as usize] }
 }
 
-/// Индекс дня недели (0=пн..6=вс) для дней от эпохи. 1970-01-01 — четверг (3).
 fn weekday_of(days: i64) -> i64 {
     (days + 3).rem_euclid(7)
 }
@@ -123,9 +84,6 @@ fn parse_hm(s: &str) -> Option<(u32, u32)> {
     Some((h.parse().ok()?, m.parse().ok()?))
 }
 
-// ---------------------------------------------------------------------
-// Разбор entries → "последний прошедший момент" (в локальных псевдо-секундах)
-// ---------------------------------------------------------------------
 
 /// entry: "<mo|tu|we|th|fr|sa|su> <HH:MM>"
 pub fn last_week_occurrence(entries: &[String], now: u64) -> Option<u64> {
@@ -144,9 +102,7 @@ pub fn last_week_occurrence(entries: &[String], now: u64) -> Option<u64> {
     }).max().map(|v| v.max(0) as u64)
 }
 
-/// entry: "<1-31> <HH:MM>". Несуществующие в текущем месяце числа (31 в
-/// феврале) — тихо пропускаются для этого месяца, ищем ближайший валидный
-/// месяц назад (до 12 месяцев вглубь).
+/// entry: "<1-31> <HH:MM>"
 pub fn last_month_occurrence(entries: &[String], now: u64) -> Option<u64> {
     let now_i = now as i64;
     let now_days = now_i.div_euclid(86400);
@@ -166,7 +122,6 @@ pub fn last_month_occurrence(entries: &[String], now: u64) -> Option<u64> {
                     return Some(candidate);
                 }
             }
-            // шаг на месяц назад
             if mo == 1 { mo = 12; y -= 1; } else { mo -= 1; }
         }
         None
@@ -192,60 +147,26 @@ fn direct_entry_secs(entry: &str) -> Option<i64> {
     Some(days_from_civil(y, m, d) * 86400 + h as i64 * 3600 + mi as i64 * 60)
 }
 
-/// Хук, вызываемый в момент активации рутины (флип active: false→true).
-/// Сейчас — только лог. Позже сюда встанет реальный вызов
-/// activate_routine() → send_message() (нативное Windows-уведомление) —
-/// см. Cue_Routines_Implementation_Plan.txt, раздел 13: решили НЕ делать
-/// подсистему "уведомить заранее/за час/за день" — просто сообщение прямо
-/// в момент срабатывания, без вариантов тайминга. Функция живёт в этом
-/// модуле (egui-независимом), чтобы и Cue, и будущий cue_daemon могли
-/// вызывать её одинаково, просто с разным телом реализации.
 pub fn on_activated(project_name: &str, task_text: &str) {
     crate::clog!("[routine] activated: project='{project_name}' task='{task_text}'");
 }
 
-// ---------------------------------------------------------------------
-// Публичный API планировщика
-// ---------------------------------------------------------------------
-
-/// Окно, в течение которого срабатывание рутины считается "свежим" и
-/// заслуживает уведомления. Если между моментом, когда рутина должна была
-/// сработать, и моментом обнаружения (тик) прошло больше — считаем это
-/// "нагоняющей" активацией (например, Cue не открывали неделю) и просто
-/// молча активируем, без уведомления — иначе при заходе в приложение можно
-/// поймать залп уведомлений по всем пропущенным рутинам разом.
-/// НЕ обязано совпадать с частотой тика — это независимые величины.
 pub const NOTIFY_WINDOW_SECS: u64 = 60;
 
-/// Момент, когда рутина должна была сработать (максимум среди week/month/
-/// direct), если он строго позже last_triggered_at — иначе None. Не флипает
-/// состояние и ничего не пишет, только считает.
 pub fn due_occurrence(routine: &Routine, now: u64) -> Option<u64> {
     let candidates = [
         routine.week.as_deref().and_then(|e| last_week_occurrence(e, now)),
         routine.month.as_deref().and_then(|e| last_month_occurrence(e, now)),
         routine.direct.as_deref().and_then(|e| last_direct_occurrence(e, now)),
     ];
-    // строго БОЛЬШЕ last_triggered_at — иначе рутина реактивировалась бы
-    // мгновенно повторно сразу после каждого выполнения в тот же слот.
     candidates.into_iter().flatten().max().filter(|&t| t > routine.last_triggered_at)
 }
 
-/// Момент (UTC), когда Cycle должен сработать: через `every` после
-/// `max(from, completed_at)`. None, если Cycle нет или `every == 0`.
-/// Считается в чистом UTC, а не в local_now(): интервал в секундах не
-/// должен прыгать при смене часового пояса или перехода на летнее время.
 pub fn cycle_due_at(routine: &Routine, completed_at: u64) -> Option<u64> {
     let c = routine.cycle.as_ref().filter(|c| c.every > 0)?;
     Some(c.from.max(completed_at).saturating_add(c.every))
 }
 
-/// Сколько секунд назад рутина стала due (0 — прямо сейчас), либо None,
-/// если ещё не пора. Объединяет календарные типы (local_now) и Cycle
-/// (utc_now) — их моменты в разных временных базах, поэтому наружу отдаётся
-/// не момент, а "давность": её и сравнивают с NOTIFY_WINDOW_SECS. Если due
-/// сразу несколько типов — берётся самая свежая. `completed_at` — поле
-/// TaskData (база отсчёта Cycle). Ничего не флипает и не пишет.
 pub fn due_secs_ago(routine: &Routine, completed_at: u64, local_now: u64, utc_now: u64) -> Option<u64> {
     let cal   = due_occurrence(routine, local_now).map(|occ| local_now.saturating_sub(occ));
     let cycle = cycle_due_at(routine, completed_at)
@@ -257,17 +178,10 @@ pub fn due_secs_ago(routine: &Routine, completed_at: u64, local_now: u64, utc_no
     }
 }
 
-/// Пора ли активировать рутину прямо сейчас? Вызывающий код обязан сам
-/// не звать это для уже активных рутин (routine.active == true) — эта
-/// функция не флипает состояние и ничего не пишет, только отвечает
-/// true/false.
 pub fn is_due(routine: &Routine, now: u64) -> bool {
     due_occurrence(routine, now).is_some()
 }
 
-/// Чистит прошедшие direct-записи (вызывается при ВЫПОЛНЕНИИ задачи, не
-/// при активации — см. решение обсуждения). week/month никогда не чистятся.
-/// Если после чистки direct опустел — убирает ключ целиком (routine.direct = None).
 pub fn prune_expired_direct(routine: &mut Routine, now: u64) {
     let Some(entries) = routine.direct.take() else { return; };
     let now_i = now as i64;

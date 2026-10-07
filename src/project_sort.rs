@@ -1,22 +1,10 @@
-//! Порядок отображения списка проектов (свитчер и выпадающий список
-//! «Всегда открывать»). Физический порядок `Vec<LoadedProject>` не
-//! меняется — на нём держатся индексы (active_project_idx и т.д.); здесь
-//! только считается, в каком порядке их показывать.
-//!
-//! Все варианты детерминированны: при равенстве главного ключа сравниваем
-//! название без учёта регистра, затем id.
-
 use std::cmp::Ordering;
 use eframe::egui::Color32;
 use crate::project::LoadedProject;
 use crate::settings::ProjectSort;
 
-/// Ниже этой насыщенности цвет считаем нейтральным (серый/чёрный/белый):
-/// у него нет осмысленного оттенка (hue), поэтому в радугу он не входит.
 const NEUTRAL_SATURATION: f32 = 0.10;
 
-/// HSV в привычных единицах: hue 0..360, saturation и value 0..1.
-/// Считается прямо по sRGB-байтам — «как выглядит цвет», без линеаризации.
 pub fn hsv(c: Color32) -> (f32, f32, f32) {
     let r = c.r() as f32 / 255.0;
     let g = c.g() as f32 / 255.0;
@@ -44,14 +32,11 @@ fn cmp_color(a: Color32, b: Color32) -> Ordering {
     let na = sa < NEUTRAL_SATURATION;
     let nb = sb < NEUTRAL_SATURATION;
     match (na, nb) {
-        (false, true)  => Ordering::Less,    // цветные — раньше нейтральных
+        (false, true)  => Ordering::Less,
         (true,  false) => Ordering::Greater,
-        // Оба цветные: по hue (радуга), при равенстве — более насыщенные
-        // раньше, затем более тёмные раньше.
         (false, false) => ha.total_cmp(&hb)
             .then(sb.total_cmp(&sa))
             .then(va.total_cmp(&vb)),
-        // Оба нейтральные: у hue тут нет смысла — от тёмного к светлому.
         (true, true)   => va.total_cmp(&vb),
     }
 }
@@ -61,7 +46,6 @@ fn cmp_name(a: &LoadedProject, b: &LoadedProject) -> Ordering {
         .then_with(|| a.id.cmp(&b.id))
 }
 
-/// Индексы `projects` в порядке отображения для выбранной сортировки.
 pub fn display_order(projects: &[LoadedProject], mode: ProjectSort) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..projects.len()).collect();
     idx.sort_by(|&i, &j| {
@@ -69,8 +53,8 @@ pub fn display_order(projects: &[LoadedProject], mode: ProjectSort) -> Vec<usize
         let primary = match mode {
             ProjectSort::ByName     => Ordering::Equal,
             ProjectSort::ByColor    => cmp_color(a.color, b.color),
-            ProjectSort::ByCreated  => b.created_at.cmp(&a.created_at),   // новые сверху
-            ProjectSort::ByModified => b.last_edited.cmp(&a.last_edited), // недавние сверху
+            ProjectSort::ByCreated  => b.created_at.cmp(&a.created_at),
+            ProjectSort::ByModified => b.last_edited.cmp(&a.last_edited),
         };
         primary.then_with(|| cmp_name(a, b))
     });
@@ -81,7 +65,6 @@ pub fn display_order(projects: &[LoadedProject], mode: ProjectSort) -> Vec<usize
 mod tests {
     use super::*;
 
-    // Палитра проектов из main.rs (PROJECT_PALETTE) — порядок «как в UI».
     const PALETTE: &[(&str, (u8, u8, u8))] = &[
         ("red",    (220, 50, 50)),
         ("orange", (249, 115, 22)),
@@ -118,8 +101,6 @@ mod tests {
 
     #[test]
     fn color_order_over_palette_rainbow_then_neutrals() {
-        // Подаём палитру в перемешанном порядке — результат должен быть
-        // «радуга, затем нейтральные от тёмного к светлому».
         let mut ps: Vec<LoadedProject> = Vec::new();
         for (i, k) in [9usize, 3, 10, 0, 7, 5, 1, 8, 2, 6, 4].iter().enumerate() {
             let (n, (r, g, b)) = PALETTE[*k];
@@ -147,8 +128,6 @@ mod tests {
 
     #[test]
     fn near_gray_with_tiny_saturation_counts_as_neutral() {
-        // 128,128,130 → saturation ≈ 0.015 < порога: не должен встать
-        // среди «красных» из-за произвольного hue.
         let ps = vec![
             proj("1", "gray", Color32::from_rgb(128, 128, 130), 0, 0),
             proj("2", "pink", Color32::from_rgb(236, 72, 153), 0, 0),
@@ -167,7 +146,7 @@ mod tests {
         ];
         let order = display_order(&ps, ProjectSort::ByName);
         assert_eq!(ps[order[0]].name, "alpha");
-        assert_eq!(ps[order[1]].id, "a"); // "Same" == "same" без регистра → по id
+        assert_eq!(ps[order[1]].id, "a");
         assert_eq!(ps[order[2]].id, "b");
     }
 

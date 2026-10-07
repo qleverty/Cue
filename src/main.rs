@@ -14,6 +14,9 @@ pub mod exclusive_bind;
 pub mod sync;
 pub mod ui;
 pub mod updater;
+pub mod daemon_liveness;
+pub mod daemon_updater;
+pub mod autostart;
 
 // ── File logger (GUI app has no console on Windows) ──────────────────────────
 
@@ -35,11 +38,6 @@ macro_rules! clog {
     ($($arg:tt)*) => { crate::write_log(&format!($($arg)*)) };
 }
 
-/// Мост между стандартным `log`-фасадом (через который egui шлёт свои
-/// внутренние warn!/error!, включая "id clash") и уже существующим
-/// файловым логом (debug.log) — без egui-варнингов было физически некуда
-/// смотреть: GUI-процесс на Windows не имеет консоли, а без установленного
-/// log::Log egui'шные log::warn! просто молча пропадали в никуда.
 struct FileLogger;
 impl log::Log for FileLogger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
@@ -69,19 +67,9 @@ pub const SEP: Color32 = Color32::from_rgba_premultiplied(255, 255, 255, 10);
 
 static TICK_PNG:  &[u8] = include_bytes!("../pics/tick.png");
 pub static CROSS_PNG: &[u8] = include_bytes!("../pics/cross.png");
-/// Маленькая галочка — подтверждение инлайн-редактирования текста задачи
-/// (появляется на месте кнопки-крестика, пока задача редактируется).
 static TICK_SMALL_PNG: &[u8] = include_bytes!("../pics/tick_small.png");
-/// Карандаш — кнопка входа в режим инлайн-редактирования текста задачи.
 static PENCIL_PNG: &[u8] = include_bytes!("../pics/pencil.png");
-/// Жёлтые часы — кнопка настройки routine у sub-задачи (сейчас временно
-/// использовала CROSS_PNG как заглушку).
 static CLOCK_PNG: &[u8] = include_bytes!("../pics/clock.png");
-// "_light" версии — забеленные копии тех же трёх иконок (сгенерированы
-// скриптом make_light_icons.py, альфа уже запечена в самом файле). Рисуются
-// поверх обычной иконки на hover — включаем/выключаем их видимость только
-// внешней альфой (0/255), а не наличием/отсутствием отрисовки (см. правило
-// про "Widget rect changed id between passes").
 static CROSS_LIGHT_PNG:  &[u8] = include_bytes!("../pics/cross_light.png");
 static CLOCK_LIGHT_PNG:  &[u8] = include_bytes!("../pics/clock_light.png");
 static PENCIL_LIGHT_PNG: &[u8] = include_bytes!("../pics/pencil_light.png");
@@ -235,9 +223,6 @@ fn add_target_for(s: &settings::Settings, main_empty: bool) -> sync::oplog::AddT
     }
 }
 
-/// Цвет подчёркивания текста задач-рутин (в main и активных subs) — тот же,
-/// что у жёлтого индикатора в шапке окна редактора рутины
-/// (см. ui/routine/mod.rs:150).
 const ROUTINE_UNDERLINE: Color32 = Color32::from_rgb(220, 180, 40);
 
 const PROJECT_PALETTE: &[Color32] = &[
@@ -271,12 +256,6 @@ struct App {
     active_project_idx:    usize,
     project_open:          bool,
     project_keyboard_focus:    Option<usize>,
-    /// Порядок показа проектов в свитчере (id, по настройке сортировки).
-    /// Пересчитывается при КАЖДОМ открытии списка и когда меняется набор
-    /// проектов; пока список открыт, а набор тот же — заморожен, чтобы строки
-    /// не прыгали «под рукой» при смене дат изменения. Пуст, пока список
-    /// закрыт. `project_keyboard_focus` — позиция в ЭТОМ порядке, не индекс
-    /// в `projects`.
     project_display_order:     Vec<String>,
     project_focus_is_keyboard: bool,
     project_focus_bias:        f32,
@@ -289,33 +268,15 @@ struct App {
     project_buf:           String,
     project_need_focus:    bool,
     project_new_color_idx: usize,
-    /// Момент последней проверки планировщика рутин (routine_scheduler::local_now()).
-    /// См. Cue_Routines_Implementation_Plan.txt, Этап 5.
     last_routine_tick:     u64,
-    /// Момент последнего обновления cue.lock (см. write_lock()) — обновляется
-    /// периодически, пока Cue жива, чтобы демон мог отличить реально
-    /// работающую Cue от давно рухнувшей сессии с тем же PID.
     last_lock_refresh:     u64,
-    /// Some — Ветка Б холодного старта: ждём батч от потока-загрузчика
-    /// (весь список проектов с диска). None — Ветка А, поток ничего не
-    /// пришлёт, ждать нечего. Этап 6 (мёрж) читает и опустошает это поле.
     project_loader_rx:     Option<std::sync::mpsc::Receiver<Vec<project::LoadedProject>>>,
-    /// Временный список id, удалённых (локально или синхронно от пира)
-    /// ПОКА ещё ждём батч от потока-загрузчика — чтобы мёрж-блок ниже не
-    /// воскресил их обратно. Наполняется только пока project_loader_rx —
-    /// Some; очищается сразу после успешного мёржа батча (окно закрылось).
     deleted_during_load:    std::collections::HashSet<String>,
     pending_ops:            Vec<sync::oplog::Op>,
     updater_spawned:        bool,
-    /// real_i (индекс в subs) задачи, которая сейчас редактируется инлайн
-    /// (карандаш). None — никто не редактируется. Пока Some — весь список
-    /// subs залочен для остальных кнопок (крестик/routine/карандаш).
     editing_task:            Option<usize>,
     edit_buf:                String,
     edit_need_focus:         bool,
-    /// real_i перетаскиваемой (drag & drop) sub-задачи. Пока Some — весь
-    /// список залочен точно так же, как при редактировании (list_locked),
-    /// а строка-источник рисуется как невидимый плейсхолдер.
     dragging_task:           Option<usize>,
 }
 
@@ -330,25 +291,13 @@ impl App {
 
         let _ = std::fs::create_dir_all(project::projects_dir());
 
-        // ── манифест + условия (i)/(ii) ─────────────────────────────────────
-        // См. Cue_Старт_Приложения_План.txt, шаг 3.
         let manifest = manifest::load();
 
-        // (i) Тот же самый дешёвый чек, что уже использует sync::SyncHandle::init
-        // (mod.rs:168) для решения "бутстрапить или нет". Дублируем его здесь,
-        // не меняя сигнатуру sync::init — см. обсуждение в плане, syscall дешевле
-        // правки интерфейса.
         let ops_path       = app_dir().join("ops.ndjson");
         let ops_ndjson_empty = std::fs::metadata(&ops_path).map(|m| m.len() == 0).unwrap_or(true);
 
-        // (ii) Манифеста нет вовсе, либо он есть, но пуст (например, юзер
-        // вручную удалил файл, или это первый запуск этой версии кода).
         let manifest_missing_or_empty = manifest.is_empty();
 
-        // Любое из двух условий → полная синхронная загрузка (Ветка А).
-        // Оба ложны (обычный случай, повседневная работа) → Ветка Б —
-        // манифестные заглушки + один активный проект синхронно, остальное
-        // едет отдельным потоком.
         let full_sync_load = ops_ndjson_empty || manifest_missing_or_empty;
 
         let (project_batch_tx, project_batch_rx) =
@@ -367,16 +316,12 @@ impl App {
             if loaded.is_empty() {
                 loaded.push(project::create_default_project());
             }
-            // Всегда, не только когда manifest_missing_or_empty — все проекты
-            // и так честно загружены в память в этот момент, лишнего чтения
-            // диска это не добавляет, а закрывает случай "манифест не пуст,
-            // но с дырой/лишней записью" (не только полностью пустой).
             clog!("[start] rebuilding manifest from {} loaded projects", loaded.len());
             manifest::rebuild_from(&loaded);
 
             active_idx = project::resolve_active_project(&loaded, &settings).unwrap_or(0);
             projects         = loaded;
-            project_loader_rx = None; // поток ничего не пришлёт — see need_load_projects ниже
+            project_loader_rx = None;
         } else {
             clog!("[start] Ветка Б (partial load) — манифест содержит {} проектов", manifest.len());
             let active  = project::load_active_with_fallback(&manifest, settings.preferred_project_id());
@@ -394,9 +339,6 @@ impl App {
                         color_hex:  entry.color_hex.clone(),
                         main:       indexmap::IndexMap::new(),
                         subs:       indexmap::IndexMap::new(),
-                        // Даты — из манифеста (для сортировки списка проектов до
-                        // того, как файлы реально прочитаны). У записей старого
-                        // формата тут 0 — просто уедут в конец списка по дате.
                         created_at:  entry.created_at,
                         last_edited: entry.last_edited,
                         loaded:     false,
@@ -407,26 +349,30 @@ impl App {
                 })
                 .collect();
             built.push(active);
-            active_idx = built.len() - 1; // именно что вставили последним — активный, реальный
+            active_idx = built.len() - 1;
 
             projects          = built;
             project_loader_rx = Some(project_batch_rx);
         }
 
-        // Поток "cue-routine": иконки — всегда; полное чтение всех файлов
-        // проектов — только если Ветка Б (Ветка А уже загрузила всё сама
-        // синхронно, повторное чтение было бы работой без цели). Флаг и tx
-        // захватываются в move-замыкании по значению, вычислены выше.
         let need_load_projects = !full_sync_load;
         std::thread::Builder::new()
             .name("cue-routine".into())
             .spawn(move || {
                 icon_cache::load();
+
+                let updater_path = app_dir().join("cue-updater.exe");
+                if !updater_path.exists() {
+                    let _ = std::fs::write(&updater_path, include_bytes!("../cue-updater.exe"));
+                }
+
                 if need_load_projects {
                     let all = project::load_all_projects();
                     let _   = project_batch_tx.send(all);
                 }
                 updater::check_and_stage_update();
+                daemon_updater::check_and_update_daemon();
+                autostart::reconcile(&settings::Settings::load());
             })
             .expect("spawn routine thread");
 
@@ -467,8 +413,8 @@ impl App {
             project_buf:           String::new(),
             project_need_focus:    false,
             project_new_color_idx: 0,
-            last_routine_tick:     0, // 0 → первый тик в update() сработает сразу
-            last_lock_refresh:     0, // 0 → первое обновление лока в update() сработает сразу
+            last_routine_tick:     0,
+            last_lock_refresh:     0,
             project_loader_rx,
             deleted_during_load:   std::collections::HashSet::new(),
             pending_ops:           Vec::new(),
@@ -482,14 +428,6 @@ impl App {
         app
     }
 
-    /// Переключает активный проект. Если целевой проект — ещё заглушка
-    /// (loaded: false, Ветка Б холодного старта, батч ещё не подъехал) —
-    /// синхронно, на месте клика, пытается дочитать именно этот один файл.
-    /// См. Cue_Мёрж_Батча_И_Битые_Файлы.txt, "СЦЕНАРИЙ: КЛИК НА ПРОЕКТ,
-    /// КОТОРОГО ЕЩЁ НЕТ В self.projects С ЗАГРУЖЕННЫМИ ЗАДАЧАМИ".
-    /// Возвращает false, если переключение не удалось (проект был фантомно
-    /// убран из ОЗУ) — в этом случае активный проект не меняется, вызывающая
-    /// сторона решает, что делать с UI (см. клик по проекту в списке).
     fn switch_to_project(&mut self, idx: usize) -> bool {
         if idx == self.active_project_idx { return true; }
 
@@ -499,12 +437,6 @@ impl App {
                     self.projects[idx] = real;
                 }
                 None => {
-                    // Любая ошибка чтения — файл битый/недоступен/лок.
-                    // Фантомно убрать из ОЗУ: НЕ логируем как удаление, НЕ
-                    // вызываем delete_file(), НЕ шлём DeleteProject op —
-                    // юзер ничего не просил удалять, файл может просто
-                    // временно быть недоступен (например пир как раз
-                    // дописывает его через sync).
                     clog!("[switch] project {} unreadable — removing phantom placeholder", self.projects[idx].id);
                     self.projects.remove(idx);
                     if idx < self.active_project_idx {
@@ -517,7 +449,7 @@ impl App {
                             Some(self.projects[self.active_project_idx].id.clone());
                         self.settings.save();
                     }
-                    return false; // idx-проекта больше нет — переключение на него отменено
+                    return false;
                 }
             }
         }
@@ -528,12 +460,6 @@ impl App {
         true
     }
 
-    /// Если зазоры между order_key задач subs стали слишком узкими (см.
-    /// LoadedProject::needs_compaction) — пересчитывает ключи ВСЕХ задач
-    /// проекта и шлёт ОДИН оп CompactOrder со списком id. Звать после
-    /// любого действия, способного сузить зазор (перетаскивание) или
-    /// добавить задачу: чем раньше оп уйдёт, тем меньше шансов на
-    /// конкурирующие MoveTask'и в старом числовом пространстве.
     fn compact_if_needed(&mut self, idx: usize) {
         if !self.projects[idx].needs_compaction() { return; }
         let order = self.projects[idx].compact_order(project::current_time());
@@ -544,27 +470,15 @@ impl App {
         self.projects[idx].save();
     }
 
-    /// Локальное завершение задачи (зелёная галочка или крестик по активной
-    /// рутине): пишет CompleteTask, применяет его к модели и, если рутина
-    /// оказалась исчерпанной (больше не сработает никогда), а настройка
-    /// `delete_spent_routines` включена — следом шлёт обычный DeleteTask
-    /// (вместе с тумбстоуном, как при ручном удалении). Решение принимается
-    /// здесь, у отправителя, по его настройке — на принимающей стороне
-    /// настройка никак не участвует, поэтому устройства не расходятся.
     fn complete_task_local(&mut self, idx: usize, task_id: String) {
         let now        = routine_scheduler::local_now();
         let project_id = self.projects[idx].id.clone();
-        // Метка расписания — только если у задачи сейчас есть рутина
-        // (см. OpKind::CompleteTask), иначе 0.
         let routine_ts = {
             let p = &self.projects[idx];
             p.main.get(task_id.as_str()).or_else(|| p.subs.get(task_id.as_str()))
                 .filter(|t| t.routine.is_some())
                 .map_or(0, |t| t.routine_edited_at)
         };
-        // Время выполнения берём из самого опа, а не вторым current_time():
-        // иначе completed_at у нас и у получателей (op.ts) могло бы
-        // разойтись на секунду.
         let done_ts = match self.sync.record_op(sync::oplog::OpKind::CompleteTask {
             project_id: project_id.clone(),
             task_id:    task_id.clone(),
@@ -590,11 +504,6 @@ impl App {
         self.projects[idx].save();
     }
 
-    /// Коммитит текущее состояние окна редактора рутины в модель/оплог/диск —
-    /// но только если оно реально отличается от того, что было при open()
-    /// (иначе просто открыл посмотреть и закрыл — не спамим SetRoutine).
-    /// Не трогает self.screen — вызывающий код сам решает, что дальше
-    /// (закрыть окно редактора или продолжить закрытие всего приложения).
     fn commit_routine_editor(&mut self) {
         let routine = self.routine_ui.build_routine();
         if routine == self.routine_ui.original { return; }
@@ -613,16 +522,12 @@ impl App {
         self.projects[idx].save();
     }
 
-    /// Тик планировщика рутин — см. Cue_Routines_Implementation_Plan.txt,
-    /// Этап 5. Вызывается из ui() не чаще, чем раз в TICK_INTERVAL_SECS
-    /// (ui() и так гарантированно зовётся минимум раз в секунду благодаря
-    /// ctx.request_repaint_after(1 сек) выше).
     fn routine_tick(&mut self) {
         const TICK_INTERVAL_SECS: u64 = 5;
         const LOCK_REFRESH_INTERVAL_SECS: u64 = 15 * 60;
 
         let now = routine_scheduler::local_now();
-        let utc = project::current_time(); // для Cycle: интервал в чистом UTC
+        let utc = project::current_time();
 
         if now >= self.last_lock_refresh + LOCK_REFRESH_INTERVAL_SECS {
             self.last_lock_refresh = now;
@@ -635,13 +540,6 @@ impl App {
         for proj in &mut self.projects {
             let mut changed = false;
 
-            // main: рутина там в норме уже active=true (см. раздел 1 плана —
-            // "не может быть неактивной и в main"), но проверяем защитно,
-            // без репозиционирования (main — всегда 0/1 элемент). Раньше эта
-            // ветка не выставляла `changed`, из-за чего активация здесь не
-            // сохранялась на диск — теперь это реальный путь (например,
-            // после применения входящего SetRoutine с сети), так что
-            // пишем наравне с subs.
             for task in proj.main.values_mut() {
                 if let Some(routine) = task.routine.as_mut() {
                     if !routine.active {
@@ -659,10 +557,6 @@ impl App {
                 }
             }
 
-            // subs: флипаем active на месте, без перемещения по IndexMap —
-            // order_key и физическая позиция задачи не меняются никогда при
-            // активации. Группировка active/inactive для показа считается
-            // отдельно, на лету, при отрисовке (см. display_order в update()).
             for task in proj.subs.values_mut() {
                 let Some(routine) = task.routine.as_mut() else { continue };
                 if !routine.active {
@@ -695,30 +589,16 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // Пишем каждый кадр безусловно (не только внутри ветки
-        // Screen::Settings) — иначе при уходе с экрана настроек значение
-        // осталось бы залипшим на last-true, и уведомления о пейринге
-        // молчали бы даже когда юзер давно закрыл настройки.
         self.sync.shared.viewing_sync_panel.store(
             matches!(self.screen, Screen::Settings)
                 && matches!(self.settings_ui.tab, settings::SettingsTab::Sync),
             std::sync::atomic::Ordering::Relaxed,
         );
 
-        // ── Alt+F4 / закрытие всего окна: если в этот момент открыт редактор
-        // рутины — успеть закоммитить его состояние перед выходом. Не
-        // мешает крашу/убийству через диспетчер задач — там этот код просто
-        // не успевает выполниться, что и требуется.
         if ctx.input(|i| i.viewport().close_requested()) {
             if matches!(self.screen, Screen::Routine) {
                 self.commit_routine_editor();
             }
-            // If the engine thread hasn't finished loading ops.ndjson yet,
-            // finish it right here so anything recorded in the meantime
-            // (including the SetRoutine commit right above, if any) actually
-            // makes it to disk before the process exits. No-op almost always —
-            // the engine thread has typically done this long before the user
-            // gets around to closing the window.
             self.sync.flush_oplog_before_exit();
 
             if !self.updater_spawned && !cfg!(debug_assertions) {
@@ -742,11 +622,8 @@ impl eframe::App for App {
             }
         }
 
-        // ── merge in historical op_ids once the background oplog load
-        // (if any) finishes — see OplogState/ensure_oplog_ready ─────────────
         self.sync.poll_oplog_ready();
 
-        // ── drain incoming sync ops (written by engine thread) ────────────
         {
             let mut dirty: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
@@ -758,19 +635,6 @@ impl eframe::App for App {
                         }
                     }
 
-                    // Узкий фикс: если оп касается проекта, который у нас
-                    // всё ещё манифестная заглушка (loaded: false, Ветка Б
-                    // холодного старта) — синхронно догрузить его ПЕРЕД
-                    // apply_op. Иначе apply_op честно нашёл бы проект в
-                    // self.projects и замутировал бы пустые main/subs
-                    // заглушки как будто это настоящий пустой проект — а
-                    // последующий save() затёр бы реальный файл на диске,
-                    // потеряв всё, что там было. Если чтение не удалось
-                    // (файл реально битый, не просто "ещё не загружен") —
-                    // фантомно убираем заглушку (тот же путь, что и в
-                    // switch_to_project при клике) и НЕ применяем оп —
-                    // ровно то же самое, что случилось бы, если бы проекта
-                    // не было в self.projects вовсе.
                     if let Some(pid) = op.kind.project_id() {
                         if let Some(idx) = self.projects.iter().position(|p| p.id == pid) {
                             if !self.projects[idx].loaded {
@@ -787,22 +651,13 @@ impl eframe::App for App {
                                             self.projects.push(project::create_default_project());
                                             self.active_project_idx = 0;
                                         }
-                                        continue; // проекта больше нет — этот оп не применяем
+                                        continue;
                                     }
                                 }
                             }
                         }
                     }
 
-                    // CompactProjectsOrder — глобальный оп (project_id() ==
-                    // None), узкий фикс выше его не покрывает. Он меняет
-                    // order_key/метку у многих проектов сразу, а у заглушек
-                    // метка ненастоящая (LWW на них проверять нельзя), и
-                    // последующий save() записал бы пустой проект поверх
-                    // файла. Поэтому пока заглушки есть — откладываем оп; он
-                    // применится после прихода батча (drain ниже). seen_ops
-                    // не трогаем: apply_op добавит op_id при реальном
-                    // применении.
                     if matches!(op.kind, sync::oplog::OpKind::CompactProjectsOrder { .. })
                         && self.projects.iter().any(|p| !p.loaded)
                     {
@@ -810,15 +665,6 @@ impl eframe::App for App {
                         continue;
                     }
 
-                    // Пер-таск опы теперь не считают project_id() авторитетным
-                    // адресом — задача могла уехать (TransferTask) в другой
-                    // проект. Если не нашлась ни по подсказке (уже догруженной
-                    // выше, если та была заглушкой), ни вообще нигде среди
-                    // self.projects — но где-то ещё остались недогруженные
-                    // заглушки, нельзя быть уверенным, что она не прячется
-                    // именно там. Откладываем оп до прихода полного батча
-                    // (см. ниже, "drain project-loader batch"), а не считаем
-                    // задачу удалённой раньше времени.
                     if let Some(tid) = op.kind.task_id() {
                         let hint  = op.kind.project_id().unwrap_or("");
                         let found = sync::apply::find_task_project(&self.projects, hint, tid).is_some();
@@ -842,10 +688,6 @@ impl eframe::App for App {
                     p.save();
                 }
             }
-            // A synced DeleteProject may have shrunk/reshuffled `projects` — guard the active
-            // index. Проверяем только физическое наличие текущего активного проекта (по id,
-            // не по preferred_project_id — тот учитывает fixed-режим и не должен тянуть сюда
-            // юзера каждый кадр, если он вручную переключился на другой проект).
             let active_id = self.settings.last_project_id.clone();
             let idx_ok = self.projects.get(self.active_project_idx)
                 .map(|p| Some(p.id.as_str()) == active_id.as_deref())
@@ -869,49 +711,25 @@ impl eframe::App for App {
                 }
             }
         }
-        // ── drain project-loader batch (Ветка Б холодного старта) ──────────
-        // Поток-загрузчик, если он был запущен (project_loader_rx == Some),
-        // шлёт РОВНО ОДИН батч и завершается — не цикл, один try_recv() в
-        // кадр достаточно, в отличие от ops_rx выше. Правило мёржа — см.
-        // Cue_Мёрж_Батча_И_Битые_Файлы.txt.
         if let Some(rx) = self.project_loader_rx.take() {
             match rx.try_recv() {
                 Ok(batch) => {
                     for incoming in batch {
-                        // Этап 7: фильтр ДО матча по self.projects — если id
-                        // был удалён (локально или синхронно от пира) пока мы
-                        // ждали этот батч, не воскрешаем его. Один проход,
-                        // без промежуточного "вставили → удалили".
                         if self.deleted_during_load.contains(&incoming.id) {
                             continue;
                         }
                         match self.projects.iter().position(|p| p.id == incoming.id) {
                             Some(idx) if self.projects[idx].loaded => {
-                                // Уже есть живые данные — полный скип, не
-                                // трогаем ничего из батча для этого id.
                             }
                             Some(idx) => {
-                                // Была заглушка (loaded: false) — полное
-                                // доверие батчу целиком.
                                 self.projects[idx] = incoming;
                             }
                             None => {
-                                // Не было даже заглушки в манифесте —
-                                // доверяем батчу целиком.
                                 self.projects.push(incoming);
                             }
                         }
                     }
-                    // Окно закрылось — сет своё дело сделал, дальше он не
-                    // нужен: project_loader_rx уже None (взяли через .take()
-                    // выше), новых батчей не будет, воскрешать больше нечему.
                     self.deleted_during_load.clear();
-                    // Пока были незагруженные заглушки, часть входящих опов
-                    // (пер-таск, не нашедшихся по прямому адресу) откладывалась
-                    // сюда — теперь, когда весь батч на месте и заглушек больше
-                    // не останется (загрузчик шлёт ровно один батч), можно
-                    // безопасно разобрать очередь: либо найдём задачу теперь
-                    // (переехала), либо она правда удалена — и то, и то честно.
                     if !self.pending_ops.is_empty() {
                         let mut dirty: std::collections::HashSet<String> =
                             std::collections::HashSet::new();
@@ -929,34 +747,19 @@ impl eframe::App for App {
                             }
                         }
                     }
-                    // Перестроить манифест из self.projects БЕЗУСЛОВНО, один
-                    // раз (это разовое, не per-frame событие — сам приход
-                    // батча случается ровно один раз за запуск). Закрывает
-                    // случай, когда id вернулся в self.projects через push
-                    // выше (ветка None), в обход save()/upsert_entry — иначе
-                    // манифест на диске так и остался бы не знать о нём.
                     manifest::rebuild_from(&self.projects);
                     ctx.request_repaint();
                 }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // Поток ещё не дочитал диск — вернуть receiver на место,
-                    // попробовать снова в следующем кадре.
                     self.project_loader_rx = Some(rx);
                 }
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    // Поток упал/запаниковал, ничего не прислав. Не блокируем
-                    // программу навсегда — просто оставляем заглушки
-                    // заглушками (тот же исход, что и "битый файл" при клике,
-                    // Этап 8, только сразу для всех разом, а не по одному).
                 }
             }
         }
 
-        // Fallback: wake egui periodically in case no sync activity.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
 
-        // ── тик планировщика рутин (Cue_Routines_Implementation_Plan.txt,
-        //    Этап 5) ────────────────────────────────────────────────────
         self.routine_tick();
 
         let window_focused = ctx.input(|i| i.focused);
@@ -1085,12 +888,6 @@ impl eframe::App for App {
             self.last_h = h;
             let size = vec2(self.w, h);
             ctx.send_viewport_cmd(ViewportCommand::InnerSize(size));
-            // При resizable(false) некоторые бэкенды winit внутренне фиксируют
-            // min/max_inner_size на текущем размере при создании окна и не
-            // обновляют их при последующих программных ресайзах — из-за этого
-            // сжаться окно может, а вырасти обратно после — не всегда. Явно
-            // подтягиваем оба ограничения к тому же размеру при каждом ресайзе,
-            // чтобы не застрять на случайно зафиксированном старом максимуме.
             ctx.send_viewport_cmd(ViewportCommand::MinInnerSize(size));
             ctx.send_viewport_cmd(ViewportCommand::MaxInnerSize(size));
         }
@@ -1139,10 +936,6 @@ impl eframe::App for App {
 
             let tab_pressed = ctx.input(|i| i.key_pressed(egui::Key::Tab));
             if tab_pressed {
-                // Коммитим любое активное поле ввода (добавление/редактирование задачи —
-                // у них уже есть commit-on-lost_focus логика ниже по кадру, просто триггерим
-                // её сами). Переименование/добавление проекта — отдельный случай: оно и
-                // так уже отбрасывается при закрытии панели существующим кодом ниже.
                 ctx.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
             }
 
@@ -1160,25 +953,14 @@ impl eframe::App for App {
                 }
             }
 
-            // Список закрыт — снимок порядка не нужен; следующее открытие
-            // посчитает его заново (там и подхватятся свежие даты).
             if !self.project_open {
                 self.project_display_order.clear();
             }
 
             if self.project_open {
                 let dropdown_top_y = bar_rect.min.y + 14.0;
-                // Не self.last_h — это наше СОБСТВЕННОЕ предположение о высоте окна (то,
-                // что мы запросили через InnerSize), а не подтверждённый факт. Если ОС
-                // почему-то не применила предыдущий ресайз (напр. смена проекта на более
-                // высокий сразу после короткого) — self.last_h расходится с реальностью,
-                // и панель кроилась по воображаемой, а не по настоящей высоте окна.
-                // Берём фактическую высоту вьюпорта напрямую, на каждый кадр.
                 let live_h = ctx.input(|i| i.viewport().inner_rect.map(|r| r.height()))
                     .unwrap_or(self.last_h);
-                // Frame ниже добавляет margin(4) сверху И снизу поверх ScrollArea — раньше
-                // это не учитывалось, и "зазор" в 10px внизу окна почти целиком съедался
-                // этой рамкой. Явно вычитаем оба margin'а + отдельный видимый зазор до низа.
                 const FRAME_MARGIN: f32 = 4.0;
                 const BOTTOM_GAP:   f32 = 4.0;
                 let available_h = (live_h - dropdown_top_y - FRAME_MARGIN * 2.0 - BOTTOM_GAP)
@@ -1190,8 +972,6 @@ impl eframe::App for App {
                 let count_font = egui::FontId::proportional(9.0);
                 const COUNT_COL: Color32 = Color32::from_gray(95);
 
-                // +34 под "(999)" — с запасом, для ширины ПОПАПА в целом (row_w
-                // общий на все строки, тут достаточно оценки на худший случай).
                 let count_reserve: f32 = if self.settings.show_task_count { 34.0 } else { 0.0 };
                 let row_w: f32 = {
                     let max_label_px = ctx.fonts_mut(|f| {
@@ -1202,10 +982,6 @@ impl eframe::App for App {
                             .fold(0.0_f32, f32::max)
                     });
                     {
-                        // clamp паникует, если min > max — а min(150.0) больше max(self.w-75.0)
-                        // ровно тогда, когда окно сузили меньше ~225px. В этом случае панели
-                        // просто некуда деваться, кроме как занять всю доступную ширину окна,
-                        // а не крашиться.
                         let max_w = self.w - 75.0;
                         if max_w < 150.0 {
                             max_w.max(40.0)
@@ -1225,9 +1001,6 @@ impl eframe::App for App {
                 let mut delete_project: Option<usize> = None;
                 let mut open_settings              = false;
 
-                // Порядок показа: пересчёт при открытии (снимок пуст) и когда
-                // набор проектов изменился (добавили/удалили/пришёл по синку).
-                // Простое изменение дат при том же наборе порядок НЕ меняет.
                 let order_stale = self.project_display_order.len() != self.projects.len()
                     || self.project_display_order.iter()
                         .any(|id| !self.projects.iter().any(|p| &p.id == id));
@@ -1238,29 +1011,16 @@ impl eframe::App for App {
                             .map(|i| self.projects[i].id.clone())
                             .collect();
                 }
-                // Физические индексы в порядке показа. Клик/удаление/Enter
-                // работают с физическим индексом (на нём держится вся остальная
-                // логика), а подсветка клавиатурного фокуса — с позицией.
                 let order_idx: Vec<usize> = self.project_display_order.iter()
                     .filter_map(|id| self.projects.iter().position(|p| &p.id == id))
                     .collect();
 
-                // Мышиный режим включает не только движение курсора, но и колесо —
-                // если крутить колесо, не двигая саму мышь, pointer.delta() остаётся
-                // нулевым, а мы должны всё равно уступить приоритет мыши, иначе
-                // принудительный vertical_scroll_offset() будет "пружинить" скролл
-                // колеса обратно к клавиатурной цели. Идёт ДО блока стрелок — стрелка
-                // на своём кадре обязана перебивать остаточную мышиную активность
-                // (например мышь чуть дрогнула секунду назад), а не наоборот.
                 let mouse_active = ctx.input(|i|
                     i.pointer.delta() != egui::Vec2::ZERO || i.smooth_scroll_delta != egui::Vec2::ZERO);
                 if mouse_active {
                     self.project_focus_is_keyboard = false;
                 }
 
-                // Клавиатурная навигация по списку — кольцом, только по реальным
-                // проектам (не задевает "Добавить"/"Настройки"). Любая стрелка забирает
-                // приоритет подсветки у мыши; любое движение мыши возвращает его обратно.
                 let n = self.projects.len();
                 let arrow_down = ctx.input(|i| i.key_pressed(egui::Key::ArrowDown));
                 let arrow_up   = ctx.input(|i| i.key_pressed(egui::Key::ArrowUp));
@@ -1272,14 +1032,6 @@ impl eframe::App for App {
                         (Some(i), true)  => (i + 1) % n,
                         (Some(i), false) => (i + n - 1) % n,
                     });
-                    // bias теперь тоже плавно ползёт к цели (см. ниже, вместе с offset,
-                    // одной и той же экспонентой) — но САМА цель раньше прыгала сразу в
-                    // полный полюс (0.2/0.8) с первого же нажатия, из-за чего область
-                    // обзора почти сразу срывалась с места целиком, а не "докатывалась"
-                    // постепенно за несколько нажатий подряд. Теперь цель растёт по
-                    // счётчику подряд идущих нажатий В ОДНУ СТОРОНУ — при развороте
-                    // счётчик сбрасывается на 1 (не на 0 — это тоже нажатие), и полюс
-                    // набирается полностью только к FOCUS_STREAK_MAX-му нажатию подряд.
                     const FOCUS_STREAK_MAX: u32 = 5;
                     self.project_focus_streak = if self.project_focus_last_dir == Some(arrow_down) {
                         (self.project_focus_streak + 1).min(FOCUS_STREAK_MAX)
@@ -1293,9 +1045,6 @@ impl eframe::App for App {
                     self.project_focus_bias_target = 0.5 + (pole - 0.5) * frac;
                 }
 
-                // Enter подтверждает именно клавиатурный фокус (не то, что параллельно
-                // подсвечено мышью) — и не должен сработать, пока в панели уже открыто
-                // поле добавления/переименования проекта (там Enter — для него).
                 if !project_adding && ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
                     if let Some(&i) = self.project_keyboard_focus
                         .and_then(|pos| order_idx.get(pos))
@@ -1307,12 +1056,6 @@ impl eframe::App for App {
                 let force_sizing_pass = (available_h - self.project_dropdown_h).abs() > 0.5;
                 self.project_dropdown_h = available_h;
 
-                // Ручная прокрутка вместо ui.scroll_to_rect_animation/animate_value_with_time —
-                // повторяем ТОЧНО ту же кривую, что использует сам egui для сглаживания
-                // колеса мыши (input_state/wheel_state.rs): экспоненциальное угасание
-                // остатка дистанции, "дойти до 90% за EXP_TIME секунд" каждый кадр — быстрый
-                // старт, плавное затухание к цели, никакого разгона в начале. EXP_TIME меньше
-                // дефолтных 0.1с egui — тебе хотелось быстрее.
                 const EXP_REACH: f32 = 0.90;
                 const EXP_TIME:  f32 = 0.035;
 
@@ -1341,10 +1084,6 @@ impl eframe::App for App {
                         } else {
                             self.project_scroll_offset += t * remaining;
                         }
-                        // Без этого кадры между "доездами" случаются только когда
-                        // перерисовку попросит что-то ДРУГОЕ (в приложении дефолтный
-                        // пульс — раз в секунду, см. request_repaint_after ниже по
-                        // файлу) — анимация двигалась рывками вместо плавных ~60 fps.
                         if bias_remaining.abs() >= 0.001 || remaining.abs() >= 1.0 {
                             ctx.request_repaint();
                         }
@@ -1355,13 +1094,6 @@ impl eframe::App for App {
                 let area_resp = egui::Area::new(egui::Id::new("project_dropdown"))
                     .fixed_pos(dropdown_pos)
                     .order(egui::Order::Foreground)
-                    // У Area — персистентный (по Id) кэш измеренного размера, который
-                    // становится ПОТОЛКОМ для следующего показа. Если available_h с
-                    // прошлого раза изменилась (сменили проект/резайзнули окно) — этот
-                    // старый потолок может быть меньше нужного и контент молча в него
-                    // упрётся, а измеренный (уже подрезанный) размер снова осядет как
-                    // новый потолок — раз сжавшись, сам не вырастет. Форсируем честный
-                    // sizing_pass именно в кадры, когда available_h реально сменилась.
                     .sizing_pass(force_sizing_pass)
                     .show(&ctx, |ui| {
                         egui::Frame::new()
@@ -1387,12 +1119,6 @@ impl eframe::App for App {
                                             let (rr, _) = ui.allocate_exact_size(
                                                 vec2(row_w, ROW_H), Sense::hover());
 
-                                            // Кликабельные зоны регистрируем ДО покраски — иначе
-                                            // текст красился по отдельному Sense::hover()-виджету
-                                            // (rr), который целиком перекрыт этими же
-                                            // Sense::click()-зонами и в hit-test'е egui никогда не
-                                            // выигрывает против них (click-зоны в приоритете), так
-                                            // что подсветка физически не могла включиться.
                                             let name_rect = egui::Rect::from_min_size(
                                                 rr.min,
                                                 vec2(row_w - 18.0, ROW_H),
@@ -1413,11 +1139,6 @@ impl eframe::App for App {
                                                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
                                             }
 
-                                            // Белый — если проект активен, ИЛИ наведён курсором
-                                            // (когда приоритет у мыши), ИЛИ под клавиатурным
-                                            // фокусом (когда приоритет у клавиатуры) — источники
-                                            // взаимоисключающие, см. project_focus_is_keyboard
-                                            // выше: последний подвигавшийся ввод и выигрывает.
                                             let kb_focused = self.project_focus_is_keyboard
                                                 && self.project_keyboard_focus == Some(pos);
                                             let mouse_focused = !self.project_focus_is_keyboard
@@ -1432,11 +1153,6 @@ impl eframe::App for App {
                                                 rr.min + vec2(7.0, ROW_H / 2.0),
                                                 3.0, proj.color);
 
-                                            // Реальная ширина счётчика ЭТОЙ строки (не общая
-                                            // догадка на "(999)") — раз он теперь прижат к концу
-                                            // имени, а не к правому краю, резерв под него должен
-                                            // быть точным, иначе между ним и крестиком остаётся
-                                            // пустой промежуток при коротких числах.
                                             let count_text = format!("({})", proj.task_count);
                                             let count_w = if self.settings.show_task_count {
                                                 ctx.fonts_mut(|f| f.layout_no_wrap(
@@ -1584,12 +1300,6 @@ impl eframe::App for App {
                             })
                     });
 
-                // Синхронизируем нашу отслеживаемую позицию с тем, что реально стало
-                // офсетом ScrollArea в этом кадре — не важно, мы ли его толкнули (режим
-                // клавиатуры) или юзер сам покрутил колесом/потаскал мышью (режим мыши,
-                // тогда мы .vertical_scroll_offset() вообще не передаём, см. ниже) —
-                // иначе при следующем переключении на клавиатуру экспоненциальный доезд
-                // стартовал бы от устаревшей позиции и дёрнул бы список.
                 self.project_scroll_offset = area_resp.inner.inner.state.offset.y;
 
                 if start_adding {
@@ -1606,10 +1316,6 @@ impl eframe::App for App {
                         let color = PROJECT_PALETTE[self.project_new_color_idx];
                         let ts    = project::current_time();
                         let mut p = project::LoadedProject::new(project::gen_id(), name, color, ts);
-                        // "В конец" — единственный вариант в v2 (сортировки
-                        // "Произвольный" ещё нет), поэтому просто ставим
-                        // ключ выше всех существующих. Тот же приём, что и
-                        // у next_end_key() для задач, только среди проектов.
                         p.order_key = self.projects.iter()
                             .map(|proj| proj.order_key)
                             .fold(0.0, f64::max) + 1000.0;
@@ -1714,26 +1420,12 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(ViewportCommand::Close); 
         }
 
-        // ── main task ────────────────────────────────────────────────────
-        // Y-координата разделителя main/subs нужна ЗАРАНЕЕ (до отрисовки
-        // main), чтобы понять, где сейчас курсор при перетаскивании (выше
-        // разделителя — "готовим promote", ниже — "готовим вставку в
-        // subs"), и подменить текст main-задачи превью перетаскиваемой.
-        // main_h — уже известная фиксированная высота main-блока, поэтому
-        // divider_y можно посчитать до, а не после его отрисовки.
         let divider_y = ui.next_widget_position().y + main_h;
         let drag_pointer = if self.dragging_task.is_some() {
             ctx.input(|i| i.pointer.interact_pos())
         } else {
             None
         };
-        // Неактивную рутину, которую теперь тоже можно тащить (см. ниже,
-        // условие старта drag), нельзя превратить в главную задачу через
-        // promote — курсор выше разделителя для неё считается НЕ "выше
-        // разделителя", а просто "очень высоко в обычном списке subs". Это
-        // само по себе уже даёт нужный эффект: ветка ниже (вставка по щели)
-        // и так корректно вставляет в самое начало subs, если курсор выше
-        // всех строк — отдельной "верхней" логики писать не пришлось.
         let dragged_is_active = self.dragging_task
             .and_then(|i| self.projects[self.active_project_idx].subs.get_index(i))
             .is_none_or(|(_, t)| project::is_active_task(t));
@@ -1761,10 +1453,6 @@ impl eframe::App for App {
                 } else if let Some(pos) = self.projects[idx].subs.iter()
                     .position(|(_, t)| project::is_active_task(t))
                 {
-                    // main пуст (прочерк) — но есть свободная активная
-                    // задача/рутина в subs. Клик по прочерку теперь сам
-                    // проверяет это и продвигает её, вместо того чтобы
-                    // просто ничего не делать.
                     let task_id    = self.projects[idx].subs.get_index(pos).unwrap().0.clone();
                     let project_id = self.projects[idx].id.clone();
                     let ts         = project::current_time();
@@ -1778,10 +1466,6 @@ impl eframe::App for App {
             }
             ui.add_space(8.0);
             let avail = ui.available_rect_before_wrap();
-            // Пока задачу тащат выше разделителя — вместо обычного текста
-            // main показываем ПРЕВЬЮ: текст перетаскиваемой задачи (и её
-            // routine-статус — для подчёркивания ниже), как будет выглядеть
-            // после promote при отпускании именно здесь.
             let dragged_preview: Option<(String, bool)> = if dragging_above_divider {
                 self.dragging_task.and_then(|i| {
                     self.projects[self.active_project_idx].subs.get_index(i)
@@ -1794,18 +1478,12 @@ impl eframe::App for App {
                 Some((t, _)) => t.as_str(),
                 None => self.projects[self.active_project_idx].main_text().unwrap_or("—"),
             };
-            // Превью печатается тем же максимально белым цветом, что и
-            // обычный main-текст — никакой прозрачности (раньше была,
-            // убрали по просьбе).
             let mut job = egui::text::LayoutJob::simple(
                 text_str.to_owned(),
                 egui::FontId::proportional(15.0),
                 Color32::WHITE,
                 avail.width() - 10.0,
             );
-            // Жёлтое подчёркивание — если задача является рутиной. Либо
-            // текущая main-задача (обычный режим), либо перетаскиваемая
-            // задача в preview-режиме (её будущий статус после promote).
             let is_routine = match &dragged_preview {
                 Some((_, has_routine)) => *has_routine,
                 None => self.projects[self.active_project_idx].main
@@ -1824,11 +1502,7 @@ impl eframe::App for App {
         ui.add_space(6.0);
 
         // ── sub tasks ────────────────────────────────────────────────────
-        // Реальные индексы в subs, отсортированные под тумблер
-        // group_inactive_at_end. Физический порядок в IndexMap НЕ трогаем —
-        // это чисто display-time сортировка.
-        // task_text/is_active идут рядом, чтобы не дёргать subs повторно
-        // в цикле отрисовки.
+
         let proj_ref = &self.projects[self.active_project_idx];
         let mut display_order: Vec<(usize, String, bool, bool)> = proj_ref.subs.values()
             .enumerate()
@@ -1844,88 +1518,36 @@ impl eframe::App for App {
                     .then_with(|| created_ats[a.0].cmp(&created_ats[b.0]))
             });
         }
-        // иначе (тумблер выключен) — оставляем физический порядок как есть
 
-        // Если в этом кадре инлайн-редактирование текста задачи (карандаш)
-        // было закоммичено/отменено по Enter — тем же нажатием НЕ должно
-        // ещё и активироваться поле "Добавить..." ниже (см. global_enter).
         let mut edit_just_finished = false;
 
         if !display_order.is_empty() {
             let (mut promote, mut delete, mut open_routine) = (None::<usize>, None::<usize>, None::<usize>);
-            // Так же, как promote/delete/open_routine — НЕ мутируем self
-            // напрямую внутри цикла отрисовки. Если начать драг или
-            // редактирование прямо посреди цикла, а суммарная высота списка
-            // из-за этого поменяется (пропадёт/появится строка), egui может
-            // тем же кадром перезапустить internal pass (auto_shrink) — и
-            // тот pass увидит self.dragging_task/editing_task УЖЕ
-            // изменённым, тогда как первый pass успел отрисовать часть строк
-            // до изменения. Структура между двумя pass'ами одного кадра
-            // расходится → "Widget rect changed id between passes" (см. баг
-            // с красными квадратами, который мы уже один раз чинили).
-            // Откладывая мутацию до конца цикла, гарантируем, что
-            // self.dragging_task/editing_task не меняются в течение ВСЕГО
-            // текущего кадра — вступают в силу только со следующего.
             let mut start_drag: Option<usize> = None;
             let mut start_edit: Option<usize> = None;
             let (mut commit_edit, mut cancel_edit) = (false, false);
-            // Пока какая-то задача редактируется ИЛИ перетаскивается — весь
-            // список залочен для остальных кнопок (не даём кликать по
-            // чужим крестикам/routine/карандашу/тексту, пока идёт правка
-            // или drag).
             let list_locked = self.editing_task.is_some() || self.dragging_task.is_some();
 
-            // Высота ScrollArea — по ПОЛНОМУ числу строк, ВСЕГДА (не по
-            // "фактически видимых"). Раньше вычитали одну строку, пока идёт
-            // драг, но раз строка теперь не пропускается, а просто рисуется
-            // с высотой 0 (см. ниже) — реальная суммарная высота контента и
-            // не меняется, значит и scroll_h не должен.
             let scroll_h = display_order.len().min(9) as f32 * (ROW - 5.0);
-            // Реальные экранные прямоугольники строк (в display-порядке) —
-            // нужны после цикла, чтобы по Y координате курсора найти щель
-            // под белую полоску-индикатор и вычислить target для reorder_sub.
             let mut row_rects: Vec<(usize, egui::Rect)> = Vec::with_capacity(display_order.len());
-            // Запоминаем исходный вертикальный item_spacing — нужен и чтобы
-            // обнулять вокруг перетаскиваемой (схлопнутой в 0) строки, и чтобы
-            // вернуть обычный перед компенсирующим спейсером в конце списка
-            // (см. ниже, после цикла).
             let default_item_spacing_y = ui.spacing().item_spacing.y;
             let default_interact_size  = ui.spacing().interact_size;
             let mut prev_was_dragged = false;
-            // Видимая (обрезанная) область скролла — нужна и здесь (авто-скролл
-            // у края), и позже, после цикла (чтобы не рисовать белую полоску
-            // выше/ниже реальной зоны отрисовки subs — над разделителем или под
-            // списком, в зоне кнопки "Добавить...").
             let mut scroll_viewport: Option<egui::Rect> = None;
             egui::ScrollArea::vertical()
                 .max_height(scroll_h)
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
                     scroll_viewport = Some(ui.clip_rect());
-                    // Ручной скролл во время драга — и колёсиком, и у края списка.
-                    // Штатную обработку колёсика ScrollArea НЕ трогаем (работает
-                    // как обычно вне драга); добавляем СВОЙ путь, включаем только
-                    // пока dragging_task активен, чтобы не задвоить скролл.
                     if let Some(pointer) = drag_pointer {
                         if self.dragging_task.is_some() {
                             let viewport = ui.clip_rect();
                             let mut delta_y = 0.0_f32;
 
-                            // Колёсико — читаем вручную и применяем сами (штатный
-                            // путь ScrollArea, судя по всему, что-то блокирует
-                            // во время активного Sense::drag() на дочернем
-                            // виджете). Без множителя — у каждого своя скорость
-                            // колёсика в ОС, подстроить универсально всё равно
-                            // не выйдет, так что просто передаём как есть.
                             delta_y += ctx.input(|i| i.smooth_scroll_delta.y);
 
-                            // Автоскролл у края видимой области — скорость растёт
-                            // линейно от 0 (на границе зоны) до максимума (у
-                            // самого края), в обе стороны. EDGE_SCROLL_MULTIPLIER —
-                            // сюда крутить, если скорость авто-скролла у края
-                            // ощущается медленно/быстро.
                             const EDGE_ZONE: f32 = 20.0;
-                            const MAX_EDGE_SPEED: f32 = 300.0; // px/сек, база
+                            const MAX_EDGE_SPEED: f32 = 300.0;
                             const EDGE_SCROLL_MULTIPLIER: f32 = 1.0;
                             let dt = ctx.input(|i| i.stable_dt);
                             if pointer.y < viewport.top() + EDGE_ZONE {
@@ -1949,75 +1571,25 @@ impl eframe::App for App {
                         let is_editing  = self.editing_task == Some(real_i);
                         let is_dragged_row = self.dragging_task == Some(real_i);
 
-                        // Перетаскиваемая строка НЕ пропускается циклом (никакого
-                        // `continue`!) — вызовы push_id/allocate_ui_with_layout
-                        // происходят КАЖДЫЙ кадр для КАЖДОЙ строки, идентично.
-                        // "Схлопывание" делаем через высоту 0.0 у ЭТОЙ строки —
-                        // тот же приём, что и анимация кнопок (меняется только
-                        // число в vec2(), не факт вызова). Раньше строка просто
-                        // пропускалась через `continue`, что меняло СУММАРНУЮ
-                        // высоту контента ScrollArea между кадрами — а именно
-                        // это, судя по всему, и провоцирует egui перезапустить
-                        // internal pass (auto_shrink пересчитывает размер), из-за
-                        // чего мутация self.dragging_task — даже отложенная после
-                        // цикла — всё равно оказывалась видна "второму" pass'у
-                        // того же кадра. Если суммарная высота контента вообще
-                        // никогда не меняется, пересчитывать нечего — переезжать
-                        // между pass'ами нечему.
-                        //
-                        // Пустое место при этом НЕ остаётся на месте задачи —
-                        // оно переносится единым компенсирующим спейсером в
-                        // самый конец списка, см. после цикла. Это тот же самый
-                        // "слот" (высота + spacing перед ним), просто в другом
-                        // месте — суммарная высота контента от этого не меняется.
                         let row_h = if is_dragged_row { 0.0 } else { ROW - 5.0 };
 
-                        // item_spacing тоже обнуляем — и ПЕРЕД этой строкой (если
-                        // она сама перетаскивается), и ПЕРЕД следующей (если
-                        // предыдущей была перетаскиваемая) — иначе зазор остаётся
-                        // с одной из двух сторон. Это чисто стилевая правка
-                        // (spacing не создаёт виджетов и не потребляет Id), так что
-                        // безопасна даже будучи завязанной на is_dragged_row.
                         ui.spacing_mut().item_spacing.y =
                             if is_dragged_row || prev_was_dragged { 0.0 } else { default_item_spacing_y };
                         prev_was_dragged = is_dragged_row;
-                        // interact_size — минимальный размер, который egui может
-                        // подставлять под интерактивные виджеты, даже если явно
-                        // просишь меньше (например, у allocate_exact_size/
-                        // allocate_ui_with_layout есть свой floor на этот счёт).
-                        // Раз строка всё равно не кликабельна, пока перетаскивается
-                        // (list_locked), занулить его для неё безопасно и по
-                        // смыслу, и по структуре (тоже просто стиль, не виджет).
                         ui.spacing_mut().interact_size =
                             if is_dragged_row { egui::vec2(0.0, 0.0) } else { default_interact_size };
 
-                        // Прямоугольник ВСЕЙ строки — вычисляем до отрисовки, чтобы
-                        // без лага в кадр знать, наведён ли курсор именно на строку
-                        // целиком (а не только когда текст под указателем).
                         let row_rect = egui::Rect::from_min_size(
                             ui.cursor().min, vec2(self.w, row_h));
                         let row_hovered = ui.rect_contains_pointer(row_rect);
-                        // Кнопки видны только на hover обычной строки; если строка
-                        // сама редактируется — у неё всегда своя галочка (см. ниже);
-                        // если залочена из-за редактирования ДРУГОЙ строки — кнопки
-                        // не показываем вовсе, они всё равно нерабочие сейчас.
                         let show_buttons = row_hovered && !list_locked;
 
-                        // push_id — обязательный паттерн egui для виджетов в цикле:
-                        // без него авто-Id внутри строки строятся по счётчику вызовов
-                        // ui.put/allocate_exact_size, а этот счётчик "плывёт" между
-                        // кадрами из-за show_buttons (разное число реально нарисованных
-                        // виджетов на разных строках/кадрах) — отсюда и ID-клэш с
-                        // красными предупреждениями egui. push_id(real_i, ...) солит
-                        // все Id внутри строки стабильным индексом задачи и полностью
-                        // убирает возможность коллизии.
                         let row_resp = ui.push_id(real_i, |ui| {
                         ui.allocate_ui_with_layout(
                             vec2(self.w, row_h),
                             Layout::right_to_left(Align::Center),
                             |ui| {
                                 if is_editing {
-                                    // ── режим редактирования этой строки ───────
                                     ui.add_space(7.0);
                                     let (chk_rect, chk_resp) = ui.allocate_exact_size(
                                         vec2(15.0, 15.0), Sense::click());
@@ -2059,56 +1631,15 @@ impl eframe::App for App {
                                         }
                                     });
                                 } else {
-                                    // ── обычный режим строки ───────────────────
-                                    // ВАЖНО: все три ui.put()-виджета вызываются
-                                    // БЕЗУСЛОВНО каждый раз — структура виджетов
-                                    // должна быть идентичной на каждом internal
-                                    // pass'е egui (multi-pass layout, см. auto_shrink
-                                    // у ScrollArea), иначе разное число виджетов
-                                    // между passes/кадрами сбивает автогенерируемые
-                                    // Id ("Widget rect changed id between passes").
-                                    // Появление/исчезновение — только через ПЛАВНОЕ
-                                    // изменение размера/отступа (t) и альфы тинта,
-                                    // а не наличие/отсутствие ui.put — количество
-                                    // вызовов остаётся неизменным на любом pass'е.
                                     let anim_id = ui.id().with("btns_anim");
                                     let t = ctx.animate_bool_with_time(anim_id, show_buttons, 0.15);
-                                    // Для перетаскиваемой строки схлопывание должно быть
-                                    // МГНОВЕННЫМ (список сразу смыкается), а не за 150мс, как
-                                    // обычное появление/исчезновение кнопок на hover — эту
-                                    // анимацию трогать не хотим, она отдельно нравится. Поэтому
-                                    // ctx.animate_bool_with_time всё равно вызываем каждый кадр
-                                    // (чтобы не задеть саму механику анимации у остальных строк),
-                                    // но РЕЗУЛЬТАТ для этой конкретной строки перебиваем на
-                                    // жёсткий 0.0 — визуально мгновенно, при этом ничего не
-                                    // меняя в структуре вызовов ниже (по-прежнему используется
-                                    // одна и та же переменная `t`).
                                     let t = if is_dragged_row { 0.0 } else { t };
-                                    // Забеливание на hover — через alpha-compositing (умножение
-                                    // тинтом не может выбелить цветной пиксель, только притемнить
-                                    // или оставить как есть). Базовый слой — оригинальные цвета
-                                    // иконки. Поверх — ТОТ ЖЕ PNG ещё раз с белым тинтом; ВАЖНО:
-                                    // этот второй ui.put() вызывается БЕЗУСЛОВНО каждый кадр,
-                                    // видимость регулируется ТОЛЬКО его альфой (0 = невидим на вид,
-                                    // но структурно всё равно нарисован) — а не наличием/
-                                    // отсутствием вызова, иначе снова ловим "Widget rect changed
-                                    // id between passes" (тот самый баг с красными квадратами).
-                                    // Забеленная версия рисуется поверх обычной иконки на
-                                    // hover — теперь это отдельный PNG-файл (cross_light.png
-                                    // и т.п.), где нужная альфа уже запечена в самом файле
-                                    // (см. make_light_icons.py), так что программно регулируем
-                                    // только "показать/спрятать" через альфу 0/255 — БЕЗУСЛОВНО
-                                    // рисуется каждый кадр, меняется только эта альфа, а не
-                                    // наличие вызова (см. правило про "Widget rect changed id
-                                    // between passes").
 
                                     ui.add_space(7.0 * t);
                                     let (btn_rect, btn_resp) = ui.allocate_exact_size(
                                         vec2(15.0 * t, 15.0 * t), Sense::click());
                                     let btn_hovered = btn_resp.hovered() && show_buttons;
                                     if btn_hovered { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
-                                    // Обычное состояние — не полная яркость (231/255), на hover —
-                                    // полная (255) плюс поверх ещё и light-иконка (см. ниже).
                                     let btn_base = if btn_hovered { 255 } else { 231 };
                                     ui.put(btn_rect, egui::Image::new(ImageSource::Bytes {
                                         uri: "bytes://cross.png".into(),
@@ -2163,12 +1694,6 @@ impl eframe::App for App {
                                     ui.add_space(6.0);
                                     ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                         ui.add_space(10.0);
-                                        // Неактивная рутина — тусклый текст, не кликабельна
-                                        // для promote (нельзя протолкнуть в main, пока не
-                                        // сработало расписание). Перетаскиваемая (is_dragged_row)
-                                        // строка — невидимый текст-плейсхолдер: место
-                                        // зарезервировано, но сам текст сейчас "летит" за
-                                        // курсором в виде превью на main/белой полоски.
                                         let text_color = if is_dragged_row {
                                             Color32::TRANSPARENT
                                         } else if is_active {
@@ -2176,29 +1701,10 @@ impl eframe::App for App {
                                         } else {
                                             Color32::from_gray(90)
                                         };
-                                        // Sense::drag() — клик по тексту больше НЕ promote'ит
-                                        // (это делает только перетаскивание выше разделителя),
-                                        // поэтому click() тут не нужен, только drag.
-                                        // Тащить можно и неактивную рутину — но только если
-                                        // группировка "неактивные в конце" ВЫКЛЮЧЕНА (иначе
-                                        // их место и так фиксировано отдельным блоком в
-                                        // конце, тащить туда-обратно незачем и запутывало бы
-                                        // саму идею группировки). Курсор-стрелки-во-все-
-                                        // стороны и старт drag ниже используют то же условие.
                                         let draggable = (is_active || !self.settings.group_inactive_at_end)
                                             && !list_locked;
                                         let sense = if draggable { Sense::drag() } else { Sense::hover() };
-                                        // Подчёркивание — отдельный, независимый от text_color
-                                        // сигнал "это рутина", только у активных строк
-                                        // (тусклые/неактивные не подчёркиваем). Через
-                                        // LayoutJob/TextFormat, а не
-                                        // RichText::underline() — иначе цвет линии слипается
-                                        // с цветом текста.
                                         let mut fmt = egui::text::TextFormat {
-                                            // Прозрачность не уменьшает размер текста — а нам
-                                            // нужно, чтобы перетаскиваемая строка не держала
-                                            // высоту вообще (как и кнопки выше). Схлопываем сам
-                                            // шрифт до почти нуля именно для неё.
                                             font_id: egui::FontId::proportional(
                                                 if is_dragged_row { 1.0 } else { 13.0 }),
                                             color: text_color,
@@ -2216,10 +1722,6 @@ impl eframe::App for App {
                                                 .selectable(false)
                                                 .sense(sense),
                                         );
-                                        // Курсор-"перемещение" (не палец) — подсказывает,
-                                        // что тут именно drag, а не клик; клик по тексту
-                                        // больше НИЧЕГО не делает — promote теперь только
-                                        // через перетаскивание выше разделителя.
                                         if draggable && label_r.hovered() {
                                             ctx.set_cursor_icon(egui::CursorIcon::AllScroll);
                                         }
@@ -2231,27 +1733,11 @@ impl eframe::App for App {
                             },
                         ).response
                         });
-                        // Саму строку по-прежнему рисуем безусловно (структура вызовов
-                        // не меняется — это важно для стабильности Id, см. комментарии
-                        // выше). А вот в row_rects её не кладём, если это перетаскиваемая
-                        // строка — она физически всё ещё "здесь" (высота 0, но позиция
-                        // никуда не делась), и если её оставить как кандидата для щели,
-                        // рядом с реальной соседней щелью появляется почти совпадающий,
-                        // но не идентичный дубликат — отсюда "две линии в один пиксель".
                         if !is_dragged_row {
                             row_rects.push((real_i, row_resp.inner.rect));
                         }
                     }
 
-                    // Компенсирующий спейсер: ровно тот "слот" (высота + обычный
-                    // item_spacing перед ним), который выше пропал у схлопнутой в
-                    // 0 перетаскиваемой строки — но не на её месте, а в самом
-                    // низу списка, прямо над "Добавить". Явно ставим ОБЫЧНЫЙ
-                    // spacing перед ним (а не тот, что мог остаться обнулённым,
-                    // если перетаскивалась как раз последняя строка) — иначе с
-                    // одной стороны спейсер прилип бы к последней задаче без
-                    // зазора. Суммарная высота контента ScrollArea от переноса
-                    // места не меняется — только его позиция.
                     if self.dragging_task.is_some() {
                         ui.spacing_mut().item_spacing.y = default_item_spacing_y;
                         ui.allocate_exact_size(vec2(self.w, ROW - 5.0), Sense::hover());
@@ -2265,8 +1751,6 @@ impl eframe::App for App {
                         let new_text = self.edit_buf.trim().to_string();
                         let idx = self.active_project_idx;
                         let old_text = self.projects[idx].subs.get_index(i).map(|(_, t)| t.text.clone());
-                        // Пустой текст или текст не поменялся — не шлём EDIT_TASK,
-                        // просто выходим из режима редактирования.
                         if !new_text.is_empty() && old_text.as_deref() != Some(new_text.as_str()) {
                             if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
                                 let task_id = task_id.clone();
@@ -2290,9 +1774,6 @@ impl eframe::App for App {
 
             let idx = self.active_project_idx;
 
-            // Применяем отложенные мутации ТОЛЬКО теперь, когда весь цикл
-            // отрисовки для этого кадра уже полностью завершён — см.
-            // комментарий у объявления start_drag/start_edit выше.
             if let Some(i) = start_edit {
                 self.editing_task   = Some(i);
                 self.edit_buf       = self.projects[idx].subs.get_index(i)
@@ -2303,20 +1784,13 @@ impl eframe::App for App {
                 self.dragging_task = Some(i);
             }
 
-            // ── drag & drop: щель под курсором, белая полоска, коммит по отпусканию ──
             if let Some(dragged_real_i) = self.dragging_task {
                 let pointer_released = ctx.input(|i| i.pointer.any_released());
                 match drag_pointer {
                     None => {
-                        // Не смогли получить позицию курсора этим кадром (обычно
-                        // случается только на самом первом кадре drag_started,
-                        // до следующего кадра) — просто ничего не делаем.
                         if pointer_released { self.dragging_task = None; }
                     }
                     Some(pointer) if dragging_above_divider => {
-                        // Курсор выше разделителя — при отпускании работает
-                        // РОВНО тот же путь, что и обычный клик по задаче
-                        // (promote), просто источник события другой.
                         let _ = pointer;
                         if pointer_released {
                             promote = Some(dragged_real_i);
@@ -2324,11 +1798,6 @@ impl eframe::App for App {
                         }
                     }
                     Some(pointer) => {
-                        // Курсор ниже разделителя — ищем ближайшую щель между
-                        // строками (в display-порядке) по Y координате курсора:
-                        // первая строка, чей центр ниже курсора — вставляем
-                        // перед ней; если такой нет — курсор ниже всех строк,
-                        // вставляем в самый конец (разрешено явно).
                         let mut insert_before: Option<usize> = None;
                         let mut line_y = row_rects.last().map(|(_, r)| r.bottom())
                             .unwrap_or(divider_y);
@@ -2339,12 +1808,6 @@ impl eframe::App for App {
                                 break;
                             }
                         }
-                        // Линия не должна залезать выше разделителя или ниже
-                        // реально отрисованной зоны subs (там уже начинается
-                        // "Добавить...") — такое может произойти, если ближайшая
-                        // щель приходится на строку, физически прокрученную за
-                        // пределы видимой области. Прижимаем к границам видимого
-                        // viewport'а ScrollArea.
                         if let Some(viewport) = scroll_viewport {
                             line_y = line_y.clamp(viewport.top(), viewport.bottom());
                         }
@@ -2359,13 +1822,8 @@ impl eframe::App for App {
                                     task_id,
                                     order_key,
                                 });
-                                // Перестановка — действие пользователя: двигаем дату
-                                // изменения и сохраняем (иначе дата и новый порядок
-                                // дошли бы до диска только со следующим save()).
                                 self.projects[idx].touch(ts);
                                 self.projects[idx].save();
-                                // Перетаскивание — единственное, что сужает зазоры
-                                // (середина между соседями): проверяем сразу.
                                 self.compact_if_needed(idx);
                             }
                             self.dragging_task = None;
@@ -2406,16 +1864,9 @@ impl eframe::App for App {
                     .unwrap_or(false);
 
                 if is_active_routine {
-                    // Крестик по активной рутине = "сделал досрочно, без
-                    // main" — первый слой брони, не удаление. Задача не
-                    // двигается: остаётся ровно там же, физически.
-                    // (Исчерпанную рутину может удалить complete_task_local
-                    // — по настройке delete_spent_routines.)
                     let task_id = self.projects[idx].subs.get_index(i).unwrap().0.clone();
                     self.complete_task_local(idx, task_id);
                 } else {
-                    // Обычная задача, либо уже неактивная рутина — реальное
-                    // удаление, как раньше.
                     if let Some((task_id, _)) = self.projects[idx].subs.get_index(i) {
                         let task_id    = task_id.clone();
                         let project_id = self.projects[idx].id.clone();
@@ -2480,11 +1931,6 @@ impl eframe::App for App {
                     ctx.memory_mut(|m| { if let Some(id) = m.focused() { m.surrender_focus(id); } });
                 }
             } else {
-                // Не даём Enter'у активировать "Добавить...", если этим же Enter'ом
-                // только что закоммитили/отменили инлайн-редактирование текста
-                // задачи (карандаш) — иначе один Enter делает сразу два дела.
-                // editing_task к этому моменту уже сброшен в None выше по кадру,
-                // поэтому проверяем именно edit_just_finished, а не editing_task.
                 let global_enter = !edit_just_finished
                     && ctx.input(|i| i.key_pressed(egui::Key::Enter));
 
@@ -2567,13 +2013,8 @@ fn main() -> eframe::Result<()> {
     }
 
     let _ = std::fs::create_dir_all(app_dir());
-    // Init file logger before anything else — GUI apps have no console on Windows.
     LOG_PATH.set(app_dir().join("debug.log")).ok();
-    // Truncate log on each run so it doesn't grow forever during debugging.
     let _ = std::fs::write(app_dir().join("debug.log"), "");
-    // Подключаем FileLogger к стандартному log-фасаду — без этого egui
-    // молча глотал бы свои внутренние warn! (в т.ч. "id clash"), и красные
-    // квадраты на экране были бы без единого объяснения, откуда они.
     let _ = log::set_logger(&FILE_LOGGER).map(|()| log::set_max_level(log::LevelFilter::Warn));
     clog!("=== Cue started ===");
 
@@ -2585,13 +2026,6 @@ fn main() -> eframe::Result<()> {
     }
     write_lock();
 
-    let updater_path = app_dir().join("cue-updater.exe");
-    if !updater_path.exists() {
-        let _ = std::fs::write(&updater_path, include_bytes!("../cue-updater.exe"));
-    }
-
-    // Регистрируем собственный AUMID для тостов (имя "Cue" + иконка в шапке).
-    // До первого notify::send; при неудаче notify сам откатится на AUMID PowerShell.
     notify::register_aumid();
 
     let settings = settings::Settings::load();

@@ -2,16 +2,13 @@ use eframe::egui::{self, Color32, Stroke};
 use crate::settings::{Settings, StartupMode};
 use crate::project::LoadedProject;
 
-fn bg()           -> Color32 { Color32::from_white_alpha(13) }  // rgba(255,255,255,0.05) — как в settings_concept.html
+fn bg()           -> Color32 { Color32::from_white_alpha(13) }
 fn bg_hover()     -> Color32 { Color32::from_white_alpha(13) }
 fn text()         -> Color32 { Color32::from_gray(190) }
 fn border()       -> Color32 { Color32::from_rgb(0x23, 0x23, 0x23) }
 fn border_hover() -> Color32 { Color32::from_rgb(0x65, 0x65, 0x65) }
 fn popup_bg()     -> Color32 { Color32::from_rgba_unmultiplied(0x09, 0x09, 0x09, 220) }
 
-/// Обрезает текст по фактической ширине в пикселях (текущий шрифт), а не
-/// по числу символов — так же, как список проектов в главной панели
-/// (main.rs, "…" через LayoutJob.wrap.overflow_character).
 fn truncate_to_width(text: &str, font: egui::FontId, color: Color32, max_width: f32) -> egui::text::LayoutJob {
     let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
     job.wrap.max_width          = max_width;
@@ -67,8 +64,6 @@ pub fn draw(ui: &mut egui::Ui, settings: &mut Settings, projects: &[LoadedProjec
                     const ROW_H: f32 = 17.0;
                     let row_font = egui::FontId::proportional(10.5);
                     ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
-                    // Тот же порядок, что и в списке проектов (настройка «Сортировка
-                    // списка проектов»).
                     let order = crate::project_sort::display_order(projects, settings.project_sort);
                     for p in order.iter().map(|&i| &projects[i]) {
                         let is_sel = settings.fixed_project_id.as_deref() == Some(p.id.as_str());

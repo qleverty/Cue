@@ -2,8 +2,6 @@ use eframe::egui::{self, Color32};
 use crate::settings::{ProjectSort, Settings};
 use super::general::{first_section_title, toggle_label};
 
-/// Вкладка «Проекты»: сортировка списка проектов. Настройка локальная (не
-/// синкается), применяется при следующем открытии списка проектов.
 pub fn draw(ui: &mut egui::Ui, settings: &mut Settings) -> bool {
     ui.add_space(14.0);
     ui.visuals_mut().selection.bg_fill = Color32::from_rgb(86, 111, 146);

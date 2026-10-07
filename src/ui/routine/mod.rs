@@ -16,10 +16,6 @@ pub const RH_MONTH:  f32 = 238.0;
 #[derive(PartialEq, Clone, Copy)]
 pub enum RoutineTab { Direct, Week, Month }
 
-/// Что должно произойти при закрытии окна редактора рутины.
-/// `None`  — окно остаётся открытым (обычный кадр отрисовки).
-/// `Close` — закрыть; вызывающий код сам решает, менялось ли что-то
-/// (сравнивая build_routine() с original), и коммитит только при изменении.
 #[derive(PartialEq, Clone, Copy)]
 pub enum CloseAction { None, Close }
 
@@ -30,13 +26,8 @@ pub struct RoutineUiState {
     pub direct:    tab_direct::DirectState,
     pub week:      tab_week::WeekState,
     pub month:     tab_month::MonthState,
-    /// Переносятся из исходной Routine через load() и обратно через
-    /// build_routine() как есть — UI их не редактирует напрямую.
     pub active:            bool,
     pub last_triggered_at: u64,
-    /// Снимок того, что было загружено через load() — используется
-    /// вызывающим кодом, чтобы не писать SetRoutine/не дёргать save(),
-    /// если пользователь ничего не поменял (просто открыл посмотреть).
     pub original: Option<crate::project::Routine>,
 }
 
@@ -65,9 +56,6 @@ impl RoutineUiState {
         }
     }
 
-    /// Полностью перезаписывает состояние окна из реальных данных задачи.
-    /// Вызывается при каждом открытии окна — чинит баг, при котором старое
-    /// состояние утекало между открытиями в рамках одного запуска.
     pub fn load(&mut self, task_id: String, task_name: String, routine: Option<&crate::project::Routine>) {
         self.task_id   = task_id;
         self.task_name = task_name;
@@ -94,17 +82,12 @@ impl RoutineUiState {
         self.tab = RoutineTab::Direct;
     }
 
-    /// Собирает Routine из текущего состояния вкладок + сохранённых
-    /// active/last_triggered_at. None, если получившаяся Routine пуста —
-    /// сохранение с пустым редактором = удаление рутины у задачи.
     pub fn build_routine(&self) -> Option<crate::project::Routine> {
         let to_opt = |v: Vec<String>| if v.is_empty() { None } else { Some(v) };
         let routine = crate::project::Routine {
             week:               to_opt(self.week.to_strings()),
             month:              to_opt(self.month.to_strings()),
             direct:             to_opt(self.direct.to_strings()),
-            // Cycle в редакторе пока нет вкладки — переносим как есть,
-            // иначе любое сохранение расписания молча стирало бы его.
             cycle:              self.original.as_ref().and_then(|r| r.cycle.clone()),
             active:             self.active,
             last_triggered_at:  self.last_triggered_at,
@@ -197,8 +180,6 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
             if resp.clicked() { state.tab = tab.clone(); }
             if resp.hovered() && !active {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                // Overdraw with brighter color on hover (inactive tabs only —
-                // the active tab is already at full brightness).
                 ui.painter().text(
                     resp.rect.center(),
                     egui::Align2::CENTER_CENTER,
@@ -217,7 +198,7 @@ pub fn draw(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut RoutineUiState) 
     ui.painter().hline(0.0..=RW, y, (0.5, crate::SEP));
     ui.add_space(1.0);
 
-    let list_h = ui.available_height() - 110.0 - 22.0; // pad + button
+    let list_h = ui.available_height() - 110.0 - 22.0;
 
     ui.with_layout(egui::Layout::bottom_up(egui::Align::Min), |ui| {
         ui.add_space(15.0);

@@ -14,19 +14,12 @@ use crate::sync::{
 
 static DESKTOP_PNG: &[u8] = include_bytes!("../../../pics/desktop.png");
 
-/// Ограничение на длину имени устройства (в символах — char_limit у egui
-/// считает именно символы, не байты, так что кириллица не режется криво).
 const DEVICE_NAME_MAX_CHARS: usize = 32;
 
-/// Допустимый диапазон порта HTTP-сервера синка. Ниже 1024 — привилегированные
-/// порты; порт discovery (UDP) занимать нельзя.
 const PORT_MIN: u16 = 1024;
 
-/// Красный ошибок — тот же, что у кнопки закрытия окна (main.rs, settings.rs).
 const ERROR_RED: Color32 = Color32::from_rgb(220, 50, 50);
 
-/// Списки (подключённые / найденные) показывают до стольких строк, дальше —
-/// скролл. Высота строк фиксированная, чтобы "ровно три" было ровно тремя.
 const LIST_MAX_ROWS: f32 = 3.0;
 const PEER_ROW_H:    f32 = 38.0;
 const FOUND_ROW_H:   f32 = 28.0;
@@ -35,7 +28,6 @@ const FOUND_ROW_H:   f32 = 28.0;
 
 pub enum ScanState {
     Idle,
-    /// Active scan; `started_at` drives the dot animation.
     Scanning { started_at: Instant },
     Results(Vec<discovery::DiscoveredPeer>),
     Empty,
@@ -47,26 +39,20 @@ impl Default for ScanState {
 
 pub struct SyncPanelState {
     pub scan_state:    ScanState,
-    /// Mirrors `sync.identity.device_name` for the editable name field.
     device_name_buf:   String,
     name_initialized:  bool,
-    /// Редактируемое поле порта (только цифры).
     port_buf:          String,
     port_initialized:  bool,
-    /// Поле порта правили с тех пор, как оно последний раз "применялось":
-    /// красный цвет ошибки при этом гаснет сразу, не дожидаясь Enter.
     port_dirty:        bool,
-    /// Низ содержимого вкладки относительно верха окна (для авто-высоты).
     content_bottom:    f32,
 }
 
 impl SyncPanelState {
-    /// Высота окна для вкладки "Синхронизация": ровно по содержимому.
     pub fn window_height(&self) -> f32 {
         if self.content_bottom > 0.0 {
             self.content_bottom.ceil()
         } else {
-            crate::settings::SH_SYNC   // первый кадр, содержимое ещё не измерено
+            crate::settings::SH_SYNC
         }
     }
 }
@@ -93,8 +79,6 @@ pub fn draw(
     sync:  &mut SyncHandle,
     settings: &mut crate::settings::Settings,
 ) -> bool {
-    // Время в статусах ("5м назад") должно тикать без движения мыши — движок
-    // опрашивает пиров раз в 30 с, столько же и между перерисовками.
     ui.ctx().request_repaint_after(std::time::Duration::from_secs(30));
     if !state.name_initialized {
         state.device_name_buf = sync.identity.device_name.clone();
@@ -115,8 +99,6 @@ pub fn draw(
             sep(ui);
             draw_discovery(ui, state, sync);
         });
-    // Окно подгоняется под содержимое: низ рамки (вместе с нижним отступом)
-    // и есть нужная высота. Применяет её SettingsUiState::target_height.
     state.content_bottom = frame.response.rect.bottom() - ui.max_rect().top();
 
     false
@@ -126,9 +108,6 @@ pub fn draw(
 
 fn draw_pairing_banner(ui: &mut egui::Ui, sync: &mut SyncHandle) {
     let pending: Vec<PairingRequest> = sync.shared.pending_pairings.lock().unwrap().clone();
-    // Заявки во взаимном ожидании (см. server::request_sync) баннером не
-    // показываем — ждём accept_sync от второй стороны. Когда окно ожидания
-    // истечёт, заявка станет обычной, поэтому просим перерисовку заранее.
     if pending.iter().any(|r| r.waiting()) {
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     }
@@ -199,7 +178,6 @@ fn draw_this_device(
                     sync.identity.device_name                 = trimmed;
                     sync.identity.save(&crate::app_dir());
                 } else {
-                    // Revert to saved name if the field was cleared.
                     state.device_name_buf = sync.identity.device_name.clone();
                 }
             }
@@ -215,8 +193,6 @@ fn draw_this_device(
                     );
                     ui.add_space(4.0);
                 }
-                // Порт занят другим приложением — сам текст порта краснеет.
-                // Как только начинаешь править поле — снова обычный цвет.
                 let failed = sync.shared.server_bind_failed.load(std::sync::atomic::Ordering::Relaxed);
                 let port_color = if failed && !state.port_dirty {
                     ERROR_RED
@@ -240,7 +216,6 @@ fn draw_this_device(
                             apply_port(sync, settings, p);
                         }
                     }
-                    // Показываем реально действующее значение (при неверном вводе — откат).
                     state.port_buf   = sync.shared.port().to_string();
                     state.port_dirty = false;
                 }
@@ -263,8 +238,6 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
                 .color(Color32::from_white_alpha(90)),
         );
     } else {
-        // До трёх устройств список просто растёт (окно подстраивается под
-        // него), дальше — скролл.
         egui::ScrollArea::vertical()
             .id_salt("sync_peers")
             .max_height(PEER_ROW_H * LIST_MAX_ROWS)
@@ -290,7 +263,6 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
                             );
                             if dis.hovered() {
                                 ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-                                // Overdraw with brighter color on hover.
                                 ui.painter().text(
                                     dis.rect.center(),
                                     egui::Align2::CENTER_CENTER,
@@ -300,15 +272,10 @@ fn draw_peers(ui: &mut egui::Ui, sync: &mut SyncHandle) {
                                 );
                             }
                             if dis.clicked() { disconnect = true; }
-                            // Зазор между именем и "Отключить".
                             ui.add_space(10.0);
 
-                            // Имя и статус занимают всё оставшееся место и
-                            // обрезаются многоточием, а не переносятся (иначе
-                            // строка перестала бы быть фиксированной высоты).
                             ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                 ui.vertical(|ui| {
-                                    // (38 − ~27 высоты двух строк) / 2 — центрируем блок.
                                     ui.add_space(5.0);
                                     ui.add(
                                         egui::Label::new(
@@ -353,7 +320,6 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
     });
     ui.add_space(4.0);
 
-    // Evaluate transition before borrowing scan_state for drawing.
     let should_finish = if let ScanState::Scanning { started_at } = &state.scan_state {
         started_at.elapsed().as_secs_f32() >= 1.8
     } else {
@@ -361,7 +327,6 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
     };
     if should_finish {
         let found = crate::sync::discovery::current(&sync.shared.discovered.discovered);
-        // Filter out already-paired peers.
         let paired_ids: std::collections::HashSet<_> = sync.shared.peers
             .read().unwrap()
             .all().iter()
@@ -381,8 +346,6 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
         ScanState::Idle => {}
 
         ScanState::Scanning { started_at } => {
-            // Обычная подпись ровно того же вида и на том же месте, что и
-            // "Устройств не найдено"; меняется только число точек.
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
             let dots = 1 + ((started_at.elapsed().as_millis() / 400) % 3) as usize;
             ui.label(
@@ -403,9 +366,6 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
                             vec2(ui.available_width(), FOUND_ROW_H),
                             egui::Layout::right_to_left(egui::Align::Center),
                             |ui| {
-                                // Если это устройство уже прислало НАМ заявку — вместо
-                                // встречного "Подключить" (породил бы взаимную заявку)
-                                // предлагаем принять существующую.
                                 let incoming = sync.shared.pending_pairings.lock().unwrap()
                                     .iter()
                                     .find(|r| r.device_id == peer.device_id && !r.waiting())
@@ -422,7 +382,7 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
                                         }
                                     }
                                 }
-                                ui.add_space(10.0);   // зазор между именем и кнопкой
+                                ui.add_space(10.0);
                                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                     ui.add(
                                         egui::Label::new(
@@ -459,34 +419,14 @@ fn draw_discovery(ui: &mut egui::Ui, state: &mut SyncPanelState, sync: &mut Sync
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-/// Состояния статус-текста (цвет текста; точку убрали). Приоритет сверху вниз:
-/// - revoked (403 от пира)          → красный, "Отвязано" (поверх несовместимости
-///   — для пользователя это важнее: его оторвали)
-/// - incompatible (/hello ответил, версия не подходит) → оранжевый, "Несовместимо"
-/// - online (последний опрос успешен) → зелёный, "Онлайн (время)"
-/// - иначе → серый, "Оффлайн (время)"; "Ожидание…" — только у свежепривязанного
-///   устройства, синка ещё не было.
-/// Время — сколько прошло с последнего ответа пира (`last_synced_at`, пишется
-/// в trusted_peers.json, переживает перезапуск). В онлайне опрос идёт каждые
-/// 30 с, поэтому там почти всегда "только что": если оно перестало мигать —
-/// пир не пропадал. status.error отдельно не проверяем — свежий обрыв
-/// неотличим от обычного оффлайна, пользователю эта разница не нужна.
-/// Состояния revoked/incompatible берутся из памяти, которая при старте
-/// заполняется из файла — до первого опроса показывается последнее известное.
 fn peer_display(peer: &PeerEntry, status: &PeerStatus) -> (Color32, String) {
     if status.revoked {
         return (ERROR_RED, "Отвязано".to_owned());
     }
     if status.incompatible {
-        // Мы реально достучались до пира (/hello ответил) — просто не
-        // понимаем формат его /ops. Отдельный от "Оффлайн"/"Отвязано" цвет
-        // и текст: причина не связь, а версия протокола. Перепроверяется
-        // каждый цикл сама — никакого "навсегда заблокирован" тут нет.
         return (Color32::from_rgb(217, 119, 6), "Несовместимо".to_owned());
     }
     if status.online {
-        // "online, но ни разу не отвечал" физически недостижимо (engine
-        // выставляет online и пишет время вместе), fallback — защитный.
         let text = match peer.last_synced_at {
             Some(ts) => format!("Онлайн ({})", format_ago(ts)),
             None     => "Онлайн".to_owned(),
@@ -504,9 +444,6 @@ fn format_ago(ts: u64) -> String {
     ago_text(crate::project::current_time().saturating_sub(ts))
 }
 
-/// "только что" (< 1 мин), дальше — только ненулевые д/ч/м, старшая слева:
-/// "1д, 2ч, 3м назад", "1ч, 2м назад", "1м назад". Секунды отбрасываются,
-/// недель и месяцев нет.
 fn ago_text(diff: u64) -> String {
     if diff < 60 {
         return "только что".to_owned();
@@ -537,7 +474,6 @@ fn block_title(ui: &mut egui::Ui, text: &str) {
     ui.add_space(6.0);
 }
 
-/// Variant of `block_title` without bottom spacing — used in horizontal rows.
 fn block_title_inline(ui: &mut egui::Ui, text: &str) {
     ui.label(
         RichText::new(text)
@@ -546,12 +482,9 @@ fn block_title_inline(ui: &mut egui::Ui, text: &str) {
     );
 }
 
-/// Текстовая "кнопка" в стиле вкладок настроек (settings.rs::draw_settings_ui) —
-/// без заливки и рамки вообще, только яркость текста меняется по наведению.
-/// primary — акцентные действия (Подключить/Принять) синим, а не белым.
 fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
-    const BLUE:       Color32 = Color32::from_rgb(74, 144, 217);   // #4A90D9
-    const BLUE_HOVER: Color32 = Color32::from_rgb(154, 199, 247);  // светлее — подсветка при наведении
+    const BLUE:       Color32 = Color32::from_rgb(74, 144, 217);
+    const BLUE_HOVER: Color32 = Color32::from_rgb(154, 199, 247);
 
     let (color, hover_color) = if primary {
         (BLUE, BLUE_HOVER)
@@ -566,7 +499,6 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     );
     if resp.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
-        // Перерисовываем текст ярче поверх — тот же приём, что у вкладок настроек.
         ui.painter().text(
             resp.rect.center(),
             egui::Align2::CENTER_CENTER,
@@ -578,11 +510,6 @@ fn btn(ui: &mut egui::Ui, text: &str, primary: bool) -> egui::Response {
     resp
 }
 
-/// Отправляет пиру заявку на пейринг (POST /1/request_sync). Никакого секрета
-/// в заявке нет — настоящий токен генерирует принимающая сторона при "Принять"
-/// и присылает его нам отдельно в /1/accept_sync (см. server::accept_pairing).
-/// Мы запоминаем, что отправили заявку: если пир одновременно отправит такую
-/// же нам, request_sync распознает взаимность и разрулит её тай-брейком.
 fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer) {
     use std::io::{Read, Write};
     use std::net::TcpStream;
@@ -593,13 +520,10 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
     sync.shared.pending_outgoing.lock().unwrap()
         .insert(peer.device_id.clone(), std::time::Instant::now());
 
-    // POST /request_sync to the peer in a background thread.
-    // NOTE: we do NOT add to trusted_peers yet — only after the peer accepts
-    // and we receive /accept_sync will we register them.
     let ip      = peer.ip.clone();
     let peer_id = peer.device_id.clone();
-    let port     = peer.port;                // порт СЕРВЕРА пира (из его discovery)
-    let our_port = sync.shared.port();       // наш — чтобы он записал нас верно
+    let port     = peer.port;
+    let our_port = sync.shared.port();
     std::thread::spawn(move || {
         let addr = format!("{ip}:{port}");
         let body = serde_json::json!({
@@ -628,7 +552,6 @@ fn send_pairing_request(sync: &mut SyncHandle, peer: &discovery::DiscoveredPeer)
         }
     });
 
-    // Wake engine for immediate pull attempt.
     sync.shared.ping_tx.try_send(()).ok();
 }
 
@@ -645,10 +568,6 @@ fn reject_pairing(sync: &mut SyncHandle, device_id: &str) {
     );
 }
 
-/// Сменить порт HTTP-сервера на ходу: сохраняем в настройки и передаём
-/// серверному потоку — он сам перебиндится, а discovery/engine уже читают порт
-/// из общего атомика. Если новый порт занят — уведомление и красная пометка в
-/// UI появятся так же, как при занятом порте на старте.
 fn apply_port(sync: &mut SyncHandle, settings: &mut crate::settings::Settings, port: u16) {
     settings.http_port = port;
     settings.save();
@@ -670,9 +589,9 @@ mod tests {
         assert_eq!(ago_text(3_600 + 60), "1ч, 1м назад");
         assert_eq!(ago_text(2 * 3_600 + 5 * 60), "2ч, 5м назад");
         assert_eq!(ago_text(86_400), "1д назад");
-        assert_eq!(ago_text(86_400 + 300), "1д, 5м назад");           // нулевые единицы пропускаются
+        assert_eq!(ago_text(86_400 + 300), "1д, 5м назад");
         assert_eq!(ago_text(86_400 + 2 * 3_600 + 3 * 60), "1д, 2ч, 3м назад");
-        assert_eq!(ago_text(120 * 86_400), "120д назад");               // недель/месяцев нет
+        assert_eq!(ago_text(120 * 86_400), "120д назад");
         assert_eq!(ago_text(12 * 86_400 + 23 * 3_600 + 59 * 60 + 59), "12д, 23ч, 59м назад");
     }
 
@@ -690,7 +609,6 @@ mod tests {
     #[test]
     fn display_priority_and_texts() {
         let now = crate::project::current_time();
-        // отвязано важнее несовместимости и онлайна
         assert_eq!(peer_display(&peer(Some(now)), &st(true, true, true)).1, "Отвязано");
         assert_eq!(peer_display(&peer(Some(now)), &st(false, false, true)).1, "Несовместимо");
         assert_eq!(peer_display(&peer(Some(now)), &st(true, false, false)).1, "Онлайн (только что)");

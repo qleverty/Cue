@@ -162,8 +162,20 @@ pub fn due_occurrence(routine: &Routine, now: u64) -> Option<u64> {
     candidates.into_iter().flatten().max().filter(|&t| t > routine.last_triggered_at)
 }
 
-pub fn is_due(routine: &Routine, now: u64) -> bool {
-    due_occurrence(routine, now).is_some()
+pub fn cycle_due_at(routine: &Routine, completed_at: u64) -> Option<u64> {
+    let c = routine.cycle.as_ref().filter(|c| c.every > 0)?;
+    Some(c.from.max(completed_at).saturating_add(c.every))
+}
+
+pub fn due_secs_ago(routine: &Routine, completed_at: u64, local_now: u64, utc_now: u64) -> Option<u64> {
+    let cal   = due_occurrence(routine, local_now).map(|occ| local_now.saturating_sub(occ));
+    let cycle = cycle_due_at(routine, completed_at)
+        .filter(|&t| utc_now >= t)
+        .map(|t| utc_now - t);
+    match (cal, cycle) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
 }
 
 pub fn prune_expired_direct(routine: &mut Routine, now: u64) {

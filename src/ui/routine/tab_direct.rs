@@ -17,8 +17,6 @@ impl DirectEntry {
         format!("{:04}-{:02}-{:02} {}", self.year, self.month + 1, self.day, self.time)
     }
 
-    /// Обратный парсер: "YYYY-MM-DD HH:MM" -> DirectEntry. None при любом
-    /// несовпадении формата — такие записи молча пропускаются при load_from.
     pub fn parse(s: &str) -> Option<Self> {
         let mut parts = s.splitn(2, ' ');
         let date = parts.next()?;
@@ -48,9 +46,6 @@ impl Default for DirectState {
 }
 
 impl DirectState {
-    /// Полностью перезаписывает entries из строк модели (или очищает, если
-    /// пусто). Также сбрасывает виджеты ввода даты/времени — это открытие
-    /// окна "с нуля", а не мердж с тем, что было введено на экране.
     pub fn load_from(&mut self, entries: &[String]) {
         self.entries = entries.iter().filter_map(|s| DirectEntry::parse(s)).collect();
         self.entries.sort_by(|a, b| (a.year, a.month, a.day, &a.time).cmp(&(b.year, b.month, b.day, &b.time)));

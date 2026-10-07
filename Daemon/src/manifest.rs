@@ -7,6 +7,14 @@ pub struct ManifestEntry {
     pub color_hex:          String,
     pub task_count:         usize,
     pub has_active_routine: bool,
+    #[serde(default)]
+    pub order_key:          f64,
+    #[serde(default)]
+    pub order_key_edited_at: u64,
+    #[serde(default)]
+    pub created_at:         u64,
+    #[serde(default)]
+    pub last_edited:        u64,
 }
 
 pub type Manifest = HashMap<String, ManifestEntry>;
@@ -54,6 +62,10 @@ pub fn rebuild_from(projects: &[crate::project::LoadedProject]) {
             color_hex:          p.color_hex.clone(),
             task_count,
             has_active_routine: p.has_active_routine(),
+            order_key:          p.order_key,
+            order_key_edited_at: p.order_key_edited_at,
+            created_at:         p.created_at,
+            last_edited:        p.last_edited,
         })
     }).collect();
     write_whole(&m);

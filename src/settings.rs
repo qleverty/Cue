@@ -6,10 +6,7 @@ use super::BG;
 
 pub const SW: f32 = 300.0;
 
-pub const SH_GENERAL:  f32 = 384.0;
-/// Лейбл + 4 радио (по аналогии с блоками «Основных»: шапка/вкладки/отступ
-/// снизу ~62 + 14 + 18 + 6 + 4×18 + 3×4). Подогнать на глаз, если окно
-/// окажется выше/ниже содержимого.
+pub const SH_GENERAL:  f32 = 290.0;
 pub const SH_PROJECTS: f32 = 184.0;
 pub const SH_SYNC:     f32 = 310.0;
 
@@ -29,10 +26,6 @@ pub enum StartupMode {
     Fixed,
 }
 
-/// Сортировка списка проектов (свитчер и выпадающий список «Всегда
-/// открывать»). Чисто локальная настройка отображения — не синкается. Сам
-/// порядок считается в `project_sort`; физический порядок `projects` не
-/// меняется. В v2.1 сюда добавится «Произвольный» (по `order_key`).
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum ProjectSort {
     ByName,
@@ -60,48 +53,29 @@ pub struct Settings {
     pub last_width:       Option<f32>,
     #[serde(default)]
     pub last_pos:         Option<[f32; 2]>,
-    /// Режим показа subs: true — неактивные рутины визуально едут в конец
-    /// списка (группировка active/inactive чисто display-time, физический
-    /// порядок в файле не трогается); false — "плоский" режим, порядок в UI
-    /// = физический порядок, неактивные просто тусклые на своём месте.
-    /// См. обсуждение 2026-08-02.
     #[serde(default = "default_group_inactive")]
     pub group_inactive_at_end: bool,
-    /// HTTP-порт синка. Значение настраивается программно (пока без UI —
-    /// см. RenameProject/RecolorProject для аналогичного паттерна), но
-    /// бэкенд уже полностью параметризован под него.
     #[serde(default = "default_http_port")]
     pub http_port: u16,
-    /// Жёлтое подчёркивание рутинных задач. Чисто отображение конкретного
-    /// устройства — не синкается (без _edited_at, как last_project_id).
     #[serde(default = "default_highlight_routines")]
     pub highlight_routines: bool,
-    /// Число задач рядом с именем проекта — только в списке проектов
-    /// (свитчере), не в шапке с текущим проектом. Тоже чисто локальное.
     #[serde(default)]
     pub show_task_count: bool,
-    /// Удалять задачу, когда у неё были только direct-рутины и все они
-    /// истекли (рутина больше никогда не сработает). Включено — после
-    /// завершения отправитель шлёт DeleteTask; выключено — задача остаётся
-    /// обычной (без рутины). Локальное предпочтение отправителя, не
-    /// синкается: результат уже целиком описан оп-ами, которые он пишет.
     #[serde(default = "default_delete_spent_routines")]
     pub delete_spent_routines: bool,
-    /// Сортировка списка проектов. Локальная, без _edited_at (как
-    /// show_task_count).
     #[serde(default)]
     pub project_sort: ProjectSort,
+    #[serde(default = "default_background_daemon")]
+    pub background_daemon: bool,
 }
 
 fn default_group_inactive() -> bool { true }
 fn default_http_port() -> u16 { crate::sync::server::DEFAULT_PORT }
 fn default_highlight_routines() -> bool { true }
 fn default_delete_spent_routines() -> bool { true }
+fn default_background_daemon() -> bool { true }
 
 impl Settings {
-    /// Единая точка применения — и для локального действия в UI, и для
-    /// входящего SetSharedSetting. LWW по `ts`: применяется, только если
-    /// строго новее уже сохранённого edited_at.
     pub fn apply_new_task_pos(&mut self, value: NewTaskPos, ts: u64) -> bool {
         if ts <= self.new_task_pos_edited_at { return false; }
         self.new_task_pos = value;
@@ -143,6 +117,7 @@ impl Default for Settings {
             show_task_count: false,
             delete_spent_routines: true,
             project_sort: ProjectSort::default(),
+            background_daemon: true,
         }
     }
 }
@@ -192,9 +167,6 @@ impl SettingsUiState {
 
 // ── Draw ──────────────────────────────────────────────────────────────────────
 
-/// Returns `(close, target_height)`.
-/// `target_height` is the desired inner window height for the active tab —
-/// the caller can forward it to `ViewportCommand::InnerSize` (Step 7).
 pub fn draw_settings_ui(
     ctx:      &egui::Context,
     ui:       &mut egui::Ui,
@@ -207,9 +179,6 @@ pub fn draw_settings_ui(
 
     ui.painter().rect_filled(ui.max_rect(), 10.0, BG);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-    // Весь текст в окне настроек — интерфейс, а не контент: его нельзя
-    // выделять (иначе по-настоящему редактируемые поля не отличить от текста).
-    // Кликабельные подписи и так делают .selectable(false) сами.
     ui.style_mut().interaction.selectable_labels = false;
 
     // ── titlebar ──────────────────────────────────────────────────────────────
@@ -290,8 +259,6 @@ pub fn draw_settings_ui(
             if resp.clicked() { state.tab = tab.clone(); }
             if resp.hovered() && !active {
                 ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
-                // Overdraw with brighter color on hover (inactive tabs only —
-                // the active tab is already at full brightness).
                 ui.painter().text(
                     resp.rect.center(),
                     egui::Align2::CENTER_CENTER,
